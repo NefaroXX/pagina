@@ -13,6 +13,15 @@ use crate::inline_parser::{
 // Block AST
 // ---------------------------------------------------------------------------
 
+/// Column alignment of a GFM table cell (from the delimiter row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Debug, Clone)]
 enum Block {
     Paragraph(Vec<String>),
@@ -27,6 +36,11 @@ enum Block {
         start: u32,
         tight: bool,
         items: Vec<Vec<Block>>,
+    },
+    Table {
+        header: Vec<String>,
+        alignments: Vec<Alignment>,
+        rows: Vec<Vec<String>>,
     },
 }
 
@@ -556,6 +570,171 @@ fn marker_content_indent(mphase: usize, mw: usize, ws: &str) -> usize {
         return mw + spaces;
     }
     mw + 1
+}
+
+// ---------------------------------------------------------------------------
+// GFM tables (GitHub Flavored Markdown pipe tables)
+// ---------------------------------------------------------------------------
+
+/// Unescape `\|` to `|` (and `\\|` to `\|`, etc.), scanning left to right.
+/// Applied to every table cell before inline parsing, so escapes inside code
+/// spans and emphasis also resolve (GFM example 200).
+fn unescape_pipes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('|') => out.push('|'),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The `spacechar` class of cmark-gfm's table scanner: space, tab, and the
+/// vertical/feed tabs (kept for exactness; the latter never occur in lines).
+fn is_table_space(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b == b'\x0b' || b == b'\x0c'
+}
+
+/// Split one table row line into cells, replicating cmark-gfm's
+/// `row_from_string` for a newline-less line: an optional leading pipe, then
+/// greedy cells of `(escaped_char | [^|\n])+` separated by `|`. Pipes escaped
+/// with a backslash stay inside the cell. An empty cell is created only when
+/// a pipe is present (`a || b` -> `[a, "", b]`); a trailing pipe does not add
+/// an empty cell. Returns None when the line is not a complete row with at
+/// least one cell.
+fn split_row_cells(s: &str) -> Option<Vec<String>> {
+    let b = s.as_bytes();
+    let len = b.len();
+    let mut offset = 0usize;
+    // Optional leading pipe plus following spaces.
+    if offset < len && b[offset] == b'|' {
+        offset += 1;
+        while offset < len && is_table_space(b[offset]) {
+            offset += 1;
+        }
+    }
+    let mut cells: Vec<String> = Vec::new();
+    let mut expect_more = true;
+    while offset < len && expect_more {
+        // Greedy cell: maximal run of (escaped_char | [^|\n]).
+        let start = offset;
+        while offset < len && b[offset] != b'|' {
+            if offset + 1 < len && b[offset] == b'\\' && b[offset + 1].is_ascii_punctuation() {
+                offset += 2;
+            } else {
+                offset += 1;
+            }
+        }
+        let cell_end = offset;
+        // Optional `|` separator, consuming trailing spaces.
+        if offset < len && b[offset] == b'|' {
+            offset += 1;
+            while offset < len && is_table_space(b[offset]) {
+                offset += 1;
+            }
+        }
+        let pipe_matched = offset > cell_end;
+        if cell_end > start || pipe_matched {
+            let cell = unescape_pipes(&b_slice(s, start, cell_end));
+            cells.push(cell.trim().to_string());
+        }
+        expect_more = pipe_matched;
+    }
+    if offset != len || cells.is_empty() {
+        return None;
+    }
+    Some(cells)
+}
+
+/// Byte-indexed substring helper (indices come from byte scanning).
+fn b_slice(s: &str, start: usize, end: usize) -> &str {
+    &s[start..end]
+}
+
+/// Parse a GFM table delimiter row (e.g. `| --- | :--: |`) into per-column
+/// alignments. Each column is `spacechar* ':'? '-'+ ':'? spacechar*` (at
+/// least one dash); leading and trailing pipes are optional. Mirrors
+/// cmark-gfm's `scan_table_start` + per-cell marker validation. Returns None
+/// when the line is not a valid delimiter row.
+fn parse_table_delimiter(s: &str) -> Option<Vec<Alignment>> {
+    let b = s.as_bytes();
+    let len = b.len();
+    let mut pos = 0usize;
+    // scan_table_start: `[|]? table_marker ([|] table_marker)* [|]? spacechar*`.
+    if pos < len && b[pos] == b'|' {
+        pos += 1;
+    }
+    let mut alignments: Vec<Alignment> = Vec::new();
+    // One `table_marker`, consuming trailing spaces.
+    let marker = |pos: &mut usize| -> Option<Alignment> {
+        while *pos < len && is_table_space(b[*pos]) {
+            *pos += 1;
+        }
+        let mut left = false;
+        let mut right = false;
+        if *pos < len && b[*pos] == b':' {
+            left = true;
+            *pos += 1;
+        }
+        let dash_start = *pos;
+        while *pos < len && b[*pos] == b'-' {
+            *pos += 1;
+        }
+        if *pos == dash_start {
+            return None;
+        }
+        if *pos < len && b[*pos] == b':' {
+            right = true;
+            *pos += 1;
+        }
+        while *pos < len && is_table_space(b[*pos]) {
+            *pos += 1;
+        }
+        Some(if left && right {
+            Alignment::Center
+        } else if left {
+            Alignment::Left
+        } else if right {
+            Alignment::Right
+        } else {
+            Alignment::None
+        })
+    };
+    alignments.push(marker(&mut pos)?);
+    // More columns, a lone trailing pipe, or the end of the line.
+    loop {
+        if pos < len && b[pos] == b'|' {
+            let save = pos;
+            pos += 1;
+            match marker(&mut pos) {
+                Some(a) => alignments.push(a),
+                None => {
+                    // The pipe closed the row instead; only spaces may follow.
+                    pos = save + 1;
+                    while pos < len && is_table_space(b[pos]) {
+                        pos += 1;
+                    }
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    if pos != len {
+        return None;
+    }
+    Some(alignments)
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1368,78 @@ fn parse_blocks_spanned(
             }
         }
 
+        // GFM table: a delimiter row (indent < 4, not a lazy line) that
+        // closes an open paragraph whose header line splits into the same
+        // number of cells. Preceding paragraph lines are flushed as one
+        // normal paragraph (pipes there stay literal); the header is not.
+        // Delimiter/header count mismatches fall through to paragraph
+        // continuation (GFM examples 203, 205).
+        if !para.is_empty() && !lines[i].lazy {
+            if let Some(after) = after_small_indent(&lines[i]) {
+                if let Some(alignments) = parse_table_delimiter(&after.s) {
+                    let header_line = para.last().expect("non-empty para").s.clone();
+                    let header_cells = split_row_cells(&header_line);
+                    let same_width =
+                        header_cells.as_ref().map(|v| v.len()) == Some(alignments.len());
+                    if same_width {
+                        let ps = i - para.len();
+                        let bs = i;
+                        if para.len() > 1 {
+                            let pre: Vec<String> =
+                                para[..para.len() - 1].iter().map(|l| l.s.clone()).collect();
+                            blocks.push(Block::Paragraph(vec![pre.join("\n")]));
+                            spans.push((ps, bs));
+                        }
+                        // The header line is consumed by the table.
+                        para.clear();
+                        let header = header_cells.expect("width checked");
+                        let ncols = alignments.len();
+                        let mut rows: Vec<Vec<String>> = Vec::new();
+                        i += 1; // consume the delimiter line
+                        while i < lines.len() {
+                            if is_blank(&lines[i].s) {
+                                break;
+                            }
+                            // Indent >= 4 after the delimiter means the line
+                            // is indented code, not another row.
+                            let after = match after_small_indent(&lines[i]) {
+                                None => break,
+                                Some(a) => a,
+                            };
+                            // Thematic breaks win over list markers.
+                            if is_thematic_break(&lines[i])
+                                || parse_atx(&lines[i]).is_some()
+                                || parse_fence_open(&lines[i]).is_some()
+                                || html_block_start(&lines[i], false).is_some()
+                                || parse_list_marker(&lines[i]).is_some()
+                                || parse_blockquote_marker(&lines[i]).is_some()
+                            {
+                                break;
+                            }
+                            let cells = match split_row_cells(&after.s) {
+                                Some(c) => c,
+                                None => break,
+                            };
+                            let mut row = cells;
+                            row.truncate(ncols);
+                            while row.len() < ncols {
+                                row.push(String::new());
+                            }
+                            rows.push(row);
+                            i += 1;
+                        }
+                        blocks.push(Block::Table {
+                            header,
+                            alignments,
+                            rows,
+                        });
+                        spans.push((bs, i));
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Reference definition (cannot interrupt a paragraph).
         if para.is_empty() {
             if let Some((key, dest, title, consumed)) = try_refdef(lines, i) {
@@ -1545,15 +1796,60 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
                 out.push_str("</ul>\n");
             }
         }
+        Block::Table {
+            header,
+            alignments,
+            rows,
+        } => {
+            out.push_str("<table>\n<thead>\n<tr>\n");
+            for (k, cell) in header.iter().enumerate() {
+                out.push_str("<th");
+                append_alignment(out, alignments.get(k).copied().unwrap_or(Alignment::None));
+                out.push('>');
+                out.push_str(&render_inline_text(cell, refs));
+                out.push_str("</th>\n");
+            }
+            out.push_str("</tr>\n</thead>\n");
+            if !rows.is_empty() {
+                out.push_str("<tbody>\n");
+                for row in rows {
+                    out.push_str("<tr>\n");
+                    for (k, cell) in row.iter().enumerate() {
+                        out.push_str("<td");
+                        append_alignment(
+                            out,
+                            alignments.get(k).copied().unwrap_or(Alignment::None),
+                        );
+                        out.push('>');
+                        out.push_str(&render_inline_text(cell, refs));
+                        out.push_str("</td>\n");
+                    }
+                    out.push_str("</tr>\n");
+                }
+                out.push_str("</tbody>\n");
+            }
+            out.push_str("</table>\n");
+        }
     }
+}
+
+/// Append a GFM ` align="…"` attribute for a column alignment.
+fn append_alignment(out: &mut String, a: Alignment) {
+    let attr = match a {
+        Alignment::None => return,
+        Alignment::Left => "left",
+        Alignment::Center => "center",
+        Alignment::Right => "right",
+    };
+    out.push_str(&format!(" align=\"{}\"", attr));
 }
 
 /// Convert a Markdown string to HTML (CommonMark 0.31.2 core).
 ///
 /// Supports ATX/setext headings, thematic breaks, indented/fenced code,
 /// HTML blocks (verbatim passthrough), blockquotes, ordered/bulleted lists
-/// (tight/loose), link reference definitions, paragraphs with lazy
-/// continuation, and full inline parsing (emphasis, links, images,
+/// (tight/loose), GFM pipe tables, link reference definitions, paragraphs
+/// with lazy continuation, and full inline parsing (emphasis, links, images,
 /// autolinks, code spans, entities, hard/soft breaks).
 ///
 /// # Examples

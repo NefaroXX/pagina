@@ -210,6 +210,70 @@ struct MdConverter {
     in_pre: bool,
 }
 
+/// Per-column alignment of an HTML table, derived from `align`/`style`
+/// attributes on `<th>`/`<td>` cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+/// One collected `<tr>` row during HTML table conversion.
+struct TableRow {
+    cells: Vec<(String, Alignment)>,
+    any_th: bool,
+    in_thead: bool,
+}
+
+/// Column alignment from a cell's attributes: the `align` attribute wins,
+/// then `style="text-align: …"`.
+fn alignment_from_attrs(attrs: &[(String, String)]) -> Alignment {
+    if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "align") {
+        match v.to_ascii_lowercase().as_str() {
+            "left" => return Alignment::Left,
+            "center" | "middle" => return Alignment::Center,
+            "right" => return Alignment::Right,
+            _ => {}
+        }
+    }
+    if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "style") {
+        let lower = v.to_ascii_lowercase();
+        if let Some(colon) = lower.find("text-align:") {
+            let value = lower[colon + "text-align:".len()..]
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim();
+            match value {
+                "left" => return Alignment::Left,
+                "center" | "middle" => return Alignment::Center,
+                "right" => return Alignment::Right,
+                _ => {}
+            }
+        }
+    }
+    Alignment::None
+}
+
+/// Escape a table cell for the pipe-table format: `|` becomes `\|`,
+/// newlines become spaces, surrounding whitespace is trimmed.
+fn escape_cell(cell: &str) -> String {
+    cell.trim().replace('|', "\\|").replace('\n', " ")
+}
+
+/// Delimiter marker for a column alignment (cmark table delimiter codes:
+/// none `---`, left `:--`, center `:-:`, right `--:`).
+fn delimiter_marker(a: Alignment) -> &'static str {
+    match a {
+        Alignment::None => "---",
+        Alignment::Left => ":--",
+        Alignment::Center => ":-:",
+        Alignment::Right => "--:",
+    }
+}
+
 impl MdConverter {
     fn new(tokens: Vec<HtmlToken>) -> Self {
         MdConverter {
@@ -356,6 +420,10 @@ impl MdConverter {
                     }
                     "br" => "\n".to_string(),
                     "hr" => "\n---\n".to_string(),
+                    "table" => {
+                        let content = self.convert_table();
+                        format!("\n{}\n", content.trim())
+                    }
                     "img" => {
                         let src = attrs
                             .iter()
@@ -428,13 +496,144 @@ impl MdConverter {
         }
         content
     }
+
+    /// Convert a `<table>` element into GFM pipe-table Markdown, consuming
+    /// through its `</table>` end tag. Consumes the closing tag itself.
+    fn convert_table(&mut self) -> String {
+        let rows = self.collect_table_rows();
+        if rows.is_empty() {
+            return String::new();
+        }
+        // Header row: the first row inside <thead>, else the first row that
+        // contains any <th>, else the first row (graceful fallback).
+        let header_idx = rows
+            .iter()
+            .position(|r| r.in_thead)
+            .or_else(|| rows.iter().position(|r| r.any_th))
+            .unwrap_or(0);
+        let header_row = &rows[header_idx];
+        let ncols = header_row.cells.len();
+        if ncols == 0 {
+            return String::new();
+        }
+        // Per-column alignment: the header cell's alignment, falling back to
+        // the first body (non-header) row's cell.
+        let mut aligns: Vec<Alignment> = Vec::with_capacity(ncols);
+        for k in 0..ncols {
+            let from_header = header_row
+                .cells
+                .get(k)
+                .map(|(_, a)| *a)
+                .unwrap_or(Alignment::None);
+            let fallback = rows
+                .iter()
+                .skip(header_idx + 1)
+                .find_map(|r| r.cells.get(k).map(|(_, a)| *a))
+                .unwrap_or(Alignment::None);
+            aligns.push(if from_header != Alignment::None {
+                from_header
+            } else {
+                fallback
+            });
+        }
+        let mut out = String::new();
+        for (k, (cell, _)) in header_row.cells.iter().take(ncols).enumerate() {
+            out.push_str(if k == 0 { "| " } else { " | " });
+            out.push_str(cell);
+        }
+        out.push_str(" |\n");
+        out.push('|');
+        for a in &aligns {
+            out.push_str(&format!(" {} |", delimiter_marker(*a)));
+        }
+        out.push('\n');
+        for (idx, row) in rows.iter().enumerate() {
+            if idx == header_idx {
+                continue;
+            }
+            out.push('|');
+            for k in 0..ncols {
+                let cell = row.cells.get(k).map(|(c, _)| c.as_str()).unwrap_or("");
+                out.push_str(&format!(" {} |", cell));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Collect every `<tr>` row (with cell content and alignment) until the
+    /// `</table>` end tag, which is consumed. Rows inside `<thead>` are
+    /// flagged; `<tbody>`/`<colgroup>`/`<caption>` are skipped structurally.
+    fn collect_table_rows(&mut self) -> Vec<TableRow> {
+        let mut rows: Vec<TableRow> = Vec::new();
+        let mut thead_depth = 0usize;
+        while self.pos < self.tokens.len() {
+            match self.peek() {
+                Some(HtmlToken::EndTag(name)) if name == "table" => {
+                    self.advance();
+                    break;
+                }
+                Some(HtmlToken::StartTag { name, .. }) if name == "thead" => {
+                    thead_depth += 1;
+                    self.advance();
+                }
+                Some(HtmlToken::EndTag(name)) if name == "thead" => {
+                    thead_depth = thead_depth.saturating_sub(1);
+                    self.advance();
+                }
+                Some(HtmlToken::StartTag { name, .. }) if name == "tr" => {
+                    self.advance();
+                    rows.push(self.collect_table_row(thead_depth > 0));
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        rows
+    }
+
+    /// Collect the cells of one `<tr>` row, consuming through `</tr>`.
+    fn collect_table_row(&mut self, in_thead: bool) -> TableRow {
+        let mut cells: Vec<(String, Alignment)> = Vec::new();
+        let mut any_th = false;
+        while self.pos < self.tokens.len() {
+            match self.peek() {
+                Some(HtmlToken::EndTag(name)) if name == "tr" => {
+                    self.advance();
+                    break;
+                }
+                Some(HtmlToken::StartTag { name, attrs, .. }) if name == "th" || name == "td" => {
+                    let name = name.clone();
+                    let attrs = attrs.clone();
+                    let is_th = name == "th";
+                    let alignment = alignment_from_attrs(&attrs);
+                    if is_th {
+                        any_th = true;
+                    }
+                    self.advance();
+                    let content = self.convert_until_end(&name);
+                    cells.push((escape_cell(&content), alignment));
+                }
+                _ => {
+                    // Skip stray whitespace/text between cells.
+                    self.convert_node();
+                }
+            }
+        }
+        TableRow {
+            cells,
+            any_th,
+            in_thead,
+        }
+    }
 }
 
 /// Convert an HTML string to Markdown.
 ///
 /// Supports headings, paragraphs, bold/italic, code spans and blocks, links,
-/// ordered and unordered lists, blockquotes, horizontal rules, `<br>`, `<img>`,
-/// and HTML entity unescaping.
+/// ordered and unordered lists, blockquotes, horizontal rules, GFM pipe
+/// tables, `<br>`, `<img>`, and HTML entity unescaping.
 ///
 /// # Examples
 ///
