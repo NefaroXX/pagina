@@ -150,13 +150,17 @@ pub fn parse_inline(input: &str) -> Vec<InlineElement> {
             }
         }
 
-        // Check for bold (**)
-        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+        // Check for bold (** or __)
+        if i + 1 < chars.len()
+            && ((chars[i] == '*' && chars[i + 1] == '*')
+                || (chars[i] == '_' && chars[i + 1] == '_'))
+        {
+            let delim = chars[i];
             let mut j = i + 2;
             let mut found = false;
 
             while j + 1 < chars.len() {
-                if chars[j] == '*' && chars[j + 1] == '*' {
+                if chars[j] == delim && chars[j + 1] == delim {
                     found = true;
                     break;
                 }
@@ -172,13 +176,16 @@ pub fn parse_inline(input: &str) -> Vec<InlineElement> {
             }
         }
 
-        // Check for italic (*) - but not **
-        if chars[i] == '*' && (i + 1 >= chars.len() || chars[i + 1] != '*') {
+        // Check for italic (* or _) - but not ** or __
+        if (chars[i] == '*' || chars[i] == '_')
+            && (i + 1 >= chars.len() || (chars[i + 1] != chars[i]))
+        {
+            let delim = chars[i];
             let mut j = i + 1;
             let mut found = false;
 
             while j < chars.len() {
-                if chars[j] == '*' && (j + 1 >= chars.len() || chars[j + 1] != '*') {
+                if chars[j] == delim && (j + 1 >= chars.len() || chars[j + 1] != delim) {
                     found = true;
                     break;
                 }
@@ -198,7 +205,7 @@ pub fn parse_inline(input: &str) -> Vec<InlineElement> {
         let start = i;
         while i < chars.len() {
             let ch = chars[i];
-            let is_special = matches!(ch, '*' | '`' | '[');
+            let is_special = matches!(ch, '*' | '_' | '`' | '[');
             if is_special {
                 break;
             }

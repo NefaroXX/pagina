@@ -26,7 +26,8 @@ pub fn parse_args() -> Result<CliArgs> {
         "to-html" => {
             if args.len() < 4 {
                 return Err(Error::MissingArgument(
-                    "to-html requires <input.md> <output.html>".to_string(),
+                    "to-html requires <input.md> <output.html> (use '-' for stdin/stdout)"
+                        .to_string(),
                 ));
             }
             Ok(CliArgs {
@@ -39,7 +40,8 @@ pub fn parse_args() -> Result<CliArgs> {
         "to-md" => {
             if args.len() < 4 {
                 return Err(Error::MissingArgument(
-                    "to-md requires <input.html> <output.md>".to_string(),
+                    "to-md requires <input.html> <output.md> (use '-' for stdin/stdout)"
+                        .to_string(),
                 ));
             }
             Ok(CliArgs {
@@ -65,8 +67,13 @@ pub fn print_help() {
     println!("USAGE:");
     println!("    md2html to-html <input.md> <output.html>");
     println!("    md2html to-md <input.html> <output.md>");
-    println!("    md2html --help");
-    println!("    md2html --version");
+    println!();
+    println!("    Use '-' as input to read from stdin, or as output to write to stdout.");
+    println!();
+    println!("EXAMPLES:");
+    println!("    md2html to-html README.md README.html");
+    println!("    cat file.md | md2html to-html - output.html");
+    println!("    md2html to-html file.md -");
     println!();
     println!("SUBCOMMANDS:");
     println!("    to-html    Convert Markdown to HTML");

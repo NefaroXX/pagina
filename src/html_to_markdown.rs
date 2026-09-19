@@ -1,4 +1,14 @@
 use crate::error::Result;
+use crate::html_escape::unescape_html;
+
+/// HTML void elements that never have children or closing tags.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
+];
+
+fn is_void_element(name: &str) -> bool {
+    VOID_ELEMENTS.contains(&name)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum HtmlToken {
@@ -233,12 +243,12 @@ impl MdConverter {
                 if self.in_pre {
                     text
                 } else {
-                    // Normalize whitespace
+                    // Normalize whitespace, then unescape HTML entities
                     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     if normalized.is_empty() {
                         String::new()
                     } else {
-                        normalized
+                        unescape_html(&normalized)
                     }
                 }
             }
@@ -250,14 +260,9 @@ impl MdConverter {
                 self.advance();
                 String::new()
             }
-            Some(HtmlToken::StartTag {
-                name,
-                attrs,
-                self_closing,
-            }) => {
+            Some(HtmlToken::StartTag { name, attrs, .. }) => {
                 let name = name.clone();
                 let attrs = attrs.clone();
-                let self_closing = *self_closing;
                 self.advance();
 
                 match name.as_str() {
@@ -349,14 +354,29 @@ impl MdConverter {
                             lines.iter().map(|l| format!("> {}", l)).collect();
                         format!("\n{}\n", quoted.join("\n"))
                     }
-                    "br" => {
-                        if self_closing {
-                            "\n".to_string()
-                        } else {
+                    "br" => "\n".to_string(),
+                    "hr" => "\n---\n".to_string(),
+                    "img" => {
+                        let src = attrs
+                            .iter()
+                            .find(|(k, _)| k == "src")
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default();
+                        let alt = attrs
+                            .iter()
+                            .find(|(k, _)| k == "alt")
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default();
+                        if src.is_empty() {
                             String::new()
+                        } else {
+                            format!("![{}]({})", alt, src)
                         }
                     }
-                    "hr" => "\n---\n".to_string(),
+                    name if is_void_element(name) => {
+                        // Other void elements: skip silently
+                        String::new()
+                    }
                     _ => {
                         // Unknown tag - skip but process children
                         self.convert_until_end(&name)
@@ -410,7 +430,18 @@ impl MdConverter {
     }
 }
 
-/// Convert HTML to Markdown
+/// Convert an HTML string to Markdown.
+///
+/// Supports headings, paragraphs, bold/italic, code spans and blocks, links,
+/// ordered and unordered lists, blockquotes, horizontal rules, `<br>`, `<img>`,
+/// and HTML entity unescaping.
+///
+/// # Examples
+///
+/// ```
+/// let md = md2html::html_to_markdown::convert("<h1>Hello</h1>").unwrap();
+/// assert_eq!(md, "# Hello\n");
+/// ```
 pub fn convert(input: &str) -> Result<String> {
     let mut tokenizer = HtmlTokenizer::new(input.to_string());
     let tokens = tokenizer.tokenize();
@@ -507,10 +538,10 @@ mod tests {
     #[test]
     fn test_html_entities() {
         let md = convert("<p>&lt;script&gt; &amp; &quot;test&quot;</p>").unwrap();
-        // Converter preserves entity references as-is in text nodes
-        assert!(md.contains("&lt;script&gt;"));
-        assert!(md.contains("&amp;"));
-        assert!(md.contains("&quot;test&quot;"));
+        // Entities are properly unescaped to their literal characters
+        assert!(md.contains("<script>"));
+        assert!(md.contains("&"));
+        assert!(md.contains("\"test\""));
     }
 
     #[test]

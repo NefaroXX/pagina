@@ -75,7 +75,18 @@ impl BlockContext {
     }
 }
 
-/// Convert Markdown to HTML
+/// Convert a Markdown string to HTML.
+///
+/// Supports ATX headings (`#`-`######`), bold (`**`/`__`), italic (`*`/`_`),
+/// code spans, fenced code blocks, links, ordered and unordered lists,
+/// blockquotes, horizontal rules (`---`/`***`/`___`), and HTML escaping.
+///
+/// # Examples
+///
+/// ```
+/// let html = md2html::markdown_to_html::convert("# Hello").unwrap();
+/// assert_eq!(html, "<h1>Hello</h1>\n");
+/// ```
 pub fn convert(input: &str) -> Result<String> {
     let mut output = String::new();
     let mut ctx = BlockContext::new();
@@ -88,7 +99,8 @@ pub fn convert(input: &str) -> Result<String> {
 
         // Check for blank line
         if trimmed.is_empty() {
-            if ctx.in_paragraph {
+            // Close any open block on blank lines (not just paragraphs)
+            if !matches!(ctx.state, BlockState::None) {
                 ctx.close_block(&mut output);
             }
             i += 1;
@@ -205,6 +217,19 @@ pub fn convert(input: &str) -> Result<String> {
                     }
                 }
             }
+        }
+
+        // Check for horizontal rule (---, ***, ___)
+        if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
+            && trimmed
+                .chars()
+                .all(|c| c == trimmed.chars().next().unwrap())
+            && trimmed.len() >= 3
+        {
+            ctx.close_block(&mut output);
+            output.push_str("<hr>\n");
+            i += 1;
+            continue;
         }
 
         // Regular paragraph text
