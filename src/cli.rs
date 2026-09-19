@@ -82,6 +82,8 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!("    -h, --help     Print help information");
     println!("    -v, --version  Print version information");
+    println!();
+    println!("Note: output preserves raw HTML and javascript:/data: URLs per CommonMark — sanitize before browser/email rendering.");
 }
 
 pub fn print_version() {
