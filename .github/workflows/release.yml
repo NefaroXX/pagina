@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release
+      - name: Package
+        id: package
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          cd target/release
+          tar czf "../../md2html-${TAG}-x86_64-unknown-linux-gnu.tar.gz" md2html
+          cd ../..
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.package.outputs.tag }}"
+          gh release create "$TAG" \
+            --title "md2html $TAG" \
+            --generate-notes \
+            "md2html-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
