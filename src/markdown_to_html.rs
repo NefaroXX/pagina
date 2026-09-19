@@ -1627,6 +1627,23 @@ mod tests {
     }
 
     #[test]
+    fn test_link_destination_not_sanitized() {
+        // Contract test: link destinations are percent-encoded but NOT
+        // sanitized. Per CommonMark the `:` in a scheme is preserved, so
+        // `javascript:` destinations survive rendering unchanged. This locks
+        // current spec behavior to prevent a silent regression where the
+        // parser starts blocking schemes — sanitization is the consumer's
+        // responsibility, not the parser's.
+        let html = convert("[x](javascript:alert(1))").unwrap();
+        assert_eq!(html, "<p><a href=\"javascript:alert(1)\">x</a></p>\n");
+
+        // Entity-encoded variant: `&#58;` decodes to `:` before rendering
+        // and yields the same unsanitized href.
+        let html = convert("[x](javascript&#58;alert(1))").unwrap();
+        assert_eq!(html, "<p><a href=\"javascript:alert(1)\">x</a></p>\n");
+    }
+
+    #[test]
     fn test_unordered_list() {
         let html = convert("- item 1\n- item 2").unwrap();
         assert_eq!(html, "<ul>\n<li>item 1</li>\n<li>item 2</li>\n</ul>\n");

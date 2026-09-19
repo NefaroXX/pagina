@@ -43,6 +43,16 @@ pub fn escape_href(input: &str) -> String {
 }
 
 /// Percent-encode a link destination (CommonMark reference behavior).
+///
+/// **Encoding-only — NOT a sanitizer.** This function percent-encodes
+/// characters that are invalid in a URL, but it does **not** filter or block
+/// URL schemes. Per CommonMark, the `:` that terminates a scheme is part of
+/// the preserved set below, so `javascript:`, `data:` and `vbscript:`
+/// destinations pass through unchanged. Consumers that render links into
+/// browsers, email clients or other active contexts MUST apply their own
+/// sanitization (e.g. a scheme allow-list) before use; this crate's output
+/// must not be treated as safe.
+///
 /// Keeps ASCII alphanumerics and `-_.~:/?#@!$&'()*+,;=%`; everything else
 /// (including `\`, `[`, `]`, `"`, `<`, `>`, spaces and non-ASCII bytes)
 /// becomes `%XX`.
