@@ -23,7 +23,7 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           cd target/release
-          tar czf "../../md2html-${TAG}-x86_64-unknown-linux-gnu.tar.gz" md2html
+          tar czf "../../pagina-${TAG}-x86_64-unknown-linux-gnu.tar.gz" pagina
           cd ../..
       - name: Create release
         env:
@@ -31,6 +31,6 @@ jobs:
         run: |
           TAG="${{ steps.package.outputs.tag }}"
           gh release create "$TAG" \
-            --title "md2html $TAG" \
+            --title "pagina $TAG" \
             --generate-notes \
-            "md2html-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "pagina-${TAG}-x86_64-unknown-linux-gnu.tar.gz"

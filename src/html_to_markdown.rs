@@ -439,7 +439,7 @@ impl MdConverter {
 /// # Examples
 ///
 /// ```
-/// let md = md2html::html_to_markdown::convert("<h1>Hello</h1>").unwrap();
+/// let md = pagina::html_to_markdown::convert("<h1>Hello</h1>").unwrap();
 /// assert_eq!(md, "# Hello\n");
 /// ```
 pub fn convert(input: &str) -> Result<String> {

@@ -1,44 +1,56 @@
-# md2html
+# pagina
 
 Bidirectional Markdown ↔ HTML converter. Zero dependencies.
 
+*"Pagina" — Latin for "page."*
+
 ## Features
 
-- **Markdown → HTML**: headings, bold/italic, code spans and fences, links, ordered/unordered lists, blockquotes, horizontal rules, HTML entity escaping
-- **HTML → Markdown**: nested inline elements, blockquotes, pre/code blocks, ordered/unordered lists, links, self-closing tags, HTML entities, comments, doctypes
+- **Markdown → HTML**: headings, bold/italic (`**`/`__`, `*`/`_`), code spans and fences, links, ordered/unordered lists, blockquotes, horizontal rules, HTML entity escaping
+- **HTML → Markdown**: nested inline elements, blockquotes, pre/code blocks, ordered/unordered lists, links, `<br>`, `<img>`, HTML entity unescaping, comments, doctypes
 - **Zero dependencies**: pure Rust standard library implementation
 - **Fast**: opt-level 3 + LTO in release builds
+- **Stdin/stdout**: pipe-friendly with `-` argument
 
 ## Installation
 
 ```bash
-cargo install md2html
+cargo install pagina
 ```
 
 ## Usage
 
 ```bash
 # Markdown to HTML
-md2html to-html input.md output.html
+pagina to-html input.md output.html
 
 # HTML to Markdown
-md2html to-md input.html output.md
+pagina to-md input.html output.md
+
+# Pipe from stdin
+cat file.md | pagina to-html - output.html
+
+# Output to stdout
+pagina to-html file.md -
 
 # Help
-md2html --help
+pagina --help
 
 # Version
-md2html --version
+pagina --version
 ```
 
 ## Examples
 
 ```bash
 # Convert a README to HTML for web preview
-md2html to-html README.md README.html
+pagina to-html README.md README.html
 
 # Extract Markdown from a saved web page
-md2html to-md page.html page.md
+pagina to-md page.html page.md
+
+# Use in a pipeline
+curl -s https://example.com | pagina to-md - page.md
 ```
 
 ## License

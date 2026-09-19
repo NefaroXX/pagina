@@ -1,17 +1,17 @@
 [package]
-name = "md2html"
+name = "pagina"
 version = "0.1.0"
 edition = "2021"
 description = "Bidirectional Markdown ↔ HTML converter"
 license = "MIT"
-repository = "https://github.com/NefaroXX/md2html"
+repository = "https://github.com/NefaroXX/pagina"
 keywords = ["markdown", "html", "converter", "cli", "bidirectional"]
 categories = ["command-line-utilities", "text-processing"]
 readme = "README.md"
-exclude = [".github/", ".gitignore", "target/"]
+exclude = [".github/", ".gitignore", "target/", ".deepwork/"]
 
 [[bin]]
-name = "md2html"
+name = "pagina"
 path = "src/main.rs"
 
 [profile.release]

@@ -1,5 +1,5 @@
-use md2html::cli::{parse_args, print_help, print_version, Subcommand};
-use md2html::error::{Error, Result};
+use pagina::cli::{parse_args, print_help, print_version, Subcommand};
+use pagina::error::{Error, Result};
 use std::fs;
 use std::io::{self, Read, Write};
 
@@ -68,7 +68,7 @@ fn write_output(path: &str, content: &str) -> Result<()> {
 
 fn convert_to_html(input_path: &str, output_path: &str) -> Result<()> {
     let input = read_input(input_path)?;
-    let html = md2html::markdown_to_html::convert(&input)?;
+    let html = pagina::markdown_to_html::convert(&input)?;
     write_output(output_path, &html)?;
     if input_path != "-" && output_path != "-" {
         println!("Converted {} -> {}", input_path, output_path);
@@ -78,7 +78,7 @@ fn convert_to_html(input_path: &str, output_path: &str) -> Result<()> {
 
 fn convert_to_md(input_path: &str, output_path: &str) -> Result<()> {
     let input = read_input(input_path)?;
-    let markdown = md2html::html_to_markdown::convert(&input)?;
+    let markdown = pagina::html_to_markdown::convert(&input)?;
     write_output(output_path, &markdown)?;
     if input_path != "-" && output_path != "-" {
         println!("Converted {} -> {}", input_path, output_path);

@@ -84,7 +84,7 @@ impl BlockContext {
 /// # Examples
 ///
 /// ```
-/// let html = md2html::markdown_to_html::convert("# Hello").unwrap();
+/// let html = pagina::markdown_to_html::convert("# Hello").unwrap();
 /// assert_eq!(html, "<h1>Hello</h1>\n");
 /// ```
 pub fn convert(input: &str) -> Result<String> {

@@ -62,18 +62,18 @@ pub fn parse_args() -> Result<CliArgs> {
 }
 
 pub fn print_help() {
-    println!("md2html - Markdown/HTML bidirectional converter");
+    println!("pagina - Markdown/HTML bidirectional converter");
     println!();
     println!("USAGE:");
-    println!("    md2html to-html <input.md> <output.html>");
-    println!("    md2html to-md <input.html> <output.md>");
+    println!("    pagina to-html <input.md> <output.html>");
+    println!("    pagina to-md <input.html> <output.md>");
     println!();
     println!("    Use '-' as input to read from stdin, or as output to write to stdout.");
     println!();
     println!("EXAMPLES:");
-    println!("    md2html to-html README.md README.html");
-    println!("    cat file.md | md2html to-html - output.html");
-    println!("    md2html to-html file.md -");
+    println!("    pagina to-html README.md README.html");
+    println!("    cat file.md | pagina to-html - output.html");
+    println!("    pagina to-html file.md -");
     println!();
     println!("SUBCOMMANDS:");
     println!("    to-html    Convert Markdown to HTML");
@@ -85,5 +85,5 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println!("md2html {}", env!("CARGO_PKG_VERSION"));
+    println!("pagina {}", env!("CARGO_PKG_VERSION"));
 }
