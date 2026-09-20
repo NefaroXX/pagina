@@ -88,7 +88,10 @@ fn block_must_start_on_first_line() {
     assert!(fm.is_none());
     // Not stripped: the `---` lines render as normal Markdown content.
     let html = convert(input);
-    assert!(html.contains("<hr />"), "expected content rendering, got {html:?}");
+    assert!(
+        html.contains("<hr />"),
+        "expected content rendering, got {html:?}"
+    );
     assert!(html.contains("<h1>Hi</h1>"));
 }
 
@@ -147,7 +150,10 @@ fn parse_preserves_original_verbatim() {
     let input = "---\ntitle: \"Hello: world\" # comment\ncount: 3\n---\n# Hello\n";
     let (fm, body) = parse_with_frontmatter(input);
     let fm = fm.expect("frontmatter present");
-    assert_eq!(fm.original, "---\ntitle: \"Hello: world\" # comment\ncount: 3\n---");
+    assert_eq!(
+        fm.original,
+        "---\ntitle: \"Hello: world\" # comment\ncount: 3\n---"
+    );
     assert_eq!(body, "# Hello\n");
 }
 
@@ -165,8 +171,7 @@ fn parse_absent_returns_input_untouched() {
 
 #[test]
 fn with_frontmatter_returns_metadata_plus_body_html() {
-    let (fm, html) =
-        markdown_to_html_with_frontmatter("---\ntitle: Hi\n---\n# Hi\n").unwrap();
+    let (fm, html) = markdown_to_html_with_frontmatter("---\ntitle: Hi\n---\n# Hi\n").unwrap();
     let fm = fm.expect("metadata kept aside");
     assert_eq!(fm.original, "---\ntitle: Hi\n---");
     assert_eq!(html, "<h1>Hi</h1>\n");
@@ -181,8 +186,7 @@ fn with_frontmatter_absent_returns_none_and_full_html() {
 
 #[test]
 fn with_frontmatter_gfm_renders_body_as_gfm() {
-    let (fm, html) =
-        markdown_to_html_with_frontmatter_gfm("+++\ntitle: x\n+++\n~~hi~~\n").unwrap();
+    let (fm, html) = markdown_to_html_with_frontmatter_gfm("+++\ntitle: x\n+++\n~~hi~~\n").unwrap();
     assert!(fm.is_some());
     assert_eq!(html, "<p><del>hi</del></p>\n");
 }
@@ -269,9 +273,138 @@ fn subset_data_without_feature() {
 #[cfg(not(feature = "frontmatter"))]
 #[test]
 fn subset_strips_surrounding_quotes() {
-    let (fm, _) =
-        parse_with_frontmatter("---\na: \"quoted\"\nb: 'single'\n---\n# H\n");
+    let (fm, _) = parse_with_frontmatter("---\na: \"quoted\"\nb: 'single'\n---\n# H\n");
     let data = &fm.expect("frontmatter present").data;
     assert_eq!(data.get("a"), Some(&"quoted".to_string()));
     assert_eq!(data.get("b"), Some(&"single".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// TOML (`+++`) blocks: delimiter rule — `---` parses as YAML, `+++` as TOML
+// ---------------------------------------------------------------------------
+
+#[test]
+fn toml_block_stripped_before_convert() {
+    let fenced = "+++\ntitle = \"Hello\"\n+++\n# Hello\n";
+    assert_eq!(convert(fenced), convert("# Hello\n"));
+    assert_eq!(convert(fenced), "<h1>Hello</h1>\n");
+}
+
+#[test]
+fn toml_round_trip_is_verbatim() {
+    let md = "+++\ntitle = \"Hi\"\ncount = 3\n+++\n# Hi\n";
+    let (fm, body) = parse_with_frontmatter(md);
+    let fm = fm.expect("toml frontmatter present");
+    assert_eq!(body, "# Hi\n");
+    assert_eq!(prepend_frontmatter(&fm, body), md);
+}
+
+#[test]
+fn yaml_style_content_in_plus_block_still_strips() {
+    // `title: Hello` is not valid TOML, but detection never depends on
+    // parsing: the block is still metadata and still stripped.
+    let input = "+++\ntitle: Hello\n+++\n# H\n";
+    let (fm, body) = parse_with_frontmatter(input);
+    fm.expect("detection never depends on parsing");
+    assert_eq!(body, "# H\n");
+    assert_eq!(convert(input), "<h1>H</h1>\n");
+}
+
+#[test]
+fn toml_style_content_in_dash_block_still_strips() {
+    // `title = "x"` has no top-level `key:` mapping line, so the `---`
+    // guard leaves it as content (unchanged historical behavior).
+    let input = "---\ntitle = \"x\"\n---\n# H\n";
+    let (fm, body) = parse_with_frontmatter(input);
+    assert!(fm.is_none());
+    assert_eq!(body, input);
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn toml_scalars_parse_with_feature() {
+    let (fm, _) = parse_with_frontmatter(
+        "+++\ntitle = \"Hello\"\ndraft = true\ncount = 3\nratio = 1.5\n+++\n# H\n",
+    );
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data["title"].as_str(), Some("Hello"));
+    assert_eq!(data["draft"].as_bool(), Some(true));
+    assert_eq!(data["count"].as_i64(), Some(3));
+    assert_eq!(data["ratio"].as_f64(), Some(1.5));
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn toml_tables_and_arrays_parse_with_feature() {
+    let (fm, _) = parse_with_frontmatter(
+        "+++\ntitle = \"Hi\"\ntags = [\"rust\", \"docs\"]\n[owner]\nname = \"Sol\"\n+++\n# H\n",
+    );
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data["title"].as_str(), Some("Hi"));
+    let tags = data["tags"].as_vec().expect("sequence");
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].as_str(), Some("rust"));
+    assert_eq!(data["owner"]["name"].as_str(), Some("Sol"));
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn toml_string_escapes_and_comments_parse_with_feature() {
+    let (fm, _) = parse_with_frontmatter(
+        "+++\ntitle = \"a \\\"quoted\\\"\" # trailing comment\nwhen = 1979-05-27\n+++\n# H\n",
+    );
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data["title"].as_str(), Some("a \"quoted\""));
+    // Datetimes are kept as strings downstream.
+    assert_eq!(data["when"].as_str(), Some("1979-05-27"));
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn toml_invalid_still_detects_with_bad_value() {
+    let input = "+++\ntitle = [unclosed\n+++\n# H\n";
+    let (fm, body) = parse_with_frontmatter(input);
+    let fm = fm.expect("detection never depends on parsing");
+    assert_eq!(body, "# H\n");
+    assert_eq!(format!("{:?}", fm.data), "BadValue");
+    // Conversion still strips the block and renders the body.
+    assert_eq!(convert(input), "<h1>H</h1>\n");
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn toml_empty_block_is_null_with_feature() {
+    let (fm, _) = parse_with_frontmatter("+++\n+++\n# H\n");
+    let fm = fm.expect("empty plus block is frontmatter");
+    assert_eq!(format!("{:?}", fm.data), "Null");
+}
+
+#[cfg(feature = "frontmatter")]
+#[test]
+fn dash_block_still_parses_as_yaml_with_feature() {
+    let (fm, _) = parse_with_frontmatter("---\ntitle: Hello\ndraft: true\n---\n# H\n");
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data["title"].as_str(), Some("Hello"));
+    assert_eq!(data["draft"].as_bool(), Some(true));
+}
+
+#[cfg(not(feature = "frontmatter"))]
+#[test]
+fn subset_toml_without_feature() {
+    let (fm, _) = parse_with_frontmatter(
+        "+++\ntitle = \"Hello\"\ncount = 3\ndraft = true\n# a comment\n[server]\nhost = \"x\"\n+++\n# H\n",
+    );
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data.get("title"), Some(&"Hello".to_string()));
+    assert_eq!(data.get("count"), Some(&"3".to_string()));
+    assert_eq!(data.get("draft"), Some(&"true".to_string()));
+    assert_eq!(data.get("server.host"), Some(&"x".to_string()));
+}
+
+#[cfg(not(feature = "frontmatter"))]
+#[test]
+fn subset_toml_keeps_arrays_verbatim_without_feature() {
+    let (fm, _) = parse_with_frontmatter("+++\ntags = [\"rust\", \"docs\"]\n+++\n# H\n");
+    let data = &fm.expect("frontmatter present").data;
+    assert_eq!(data.get("tags"), Some(&"[\"rust\", \"docs\"]".to_string()));
 }

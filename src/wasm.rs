@@ -87,10 +87,12 @@ pub fn frontmatter_original(input: &str) -> Option<String> {
 /// Value of one top-level `key` in the leading frontmatter block, or `None`
 /// when the block (or the key) is absent.
 ///
-/// With the `frontmatter` cargo feature this reads the `yaml-rust` mapping
-/// (scalars stringified: strings verbatim, numbers/bools via `to_string`);
-/// without it, it reads the dependency-free `key: value` fallback map.
-/// Non-scalar values (lists, nested maps, null) yield `None`.
+/// With the `frontmatter` cargo feature this reads the mapping (`---`
+/// blocks as YAML via `yaml-rust`, `+++` blocks as TOML converted to the
+/// same shape; scalars stringified: strings verbatim, numbers/bools via
+/// `to_string`); without it, it reads the dependency-free fallback maps
+/// (`key: value` for `---`, `key = value` with `[table]` prefixes for
+/// `+++`). Non-scalar values (lists, nested maps, null) yield `None`.
 #[wasm_bindgen]
 pub fn frontmatter_get(input: &str, key: &str) -> Option<String> {
     let (fm, _) = crate::frontmatter::parse_with_frontmatter(input);
