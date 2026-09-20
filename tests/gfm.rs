@@ -227,8 +227,8 @@ fn options_entry_points_agree() {
     let via_opts =
         html_to_markdown::convert_with("<del>x</del>", html_to_markdown::Options::gfm()).unwrap();
     assert_eq!(via_opts, rev(true, "<del>x</del>"));
-    assert_eq!(markdown_to_html::Options::default().gfm, false);
-    assert_eq!(html_to_markdown::Options::default().gfm, false);
+    assert!(!markdown_to_html::Options::default().gfm);
+    assert!(!html_to_markdown::Options::default().gfm);
 }
 
 #[test]

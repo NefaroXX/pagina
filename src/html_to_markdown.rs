@@ -422,9 +422,7 @@ impl MdConverter {
                             .map(|(_, v)| v.clone())
                             .unwrap_or_default();
                         let content = self.convert_until_end("a");
-                        if href.is_empty() {
-                            content
-                        } else if self.gfm && is_bare_anchor(&content, &href) {
+                        if href.is_empty() || (self.gfm && is_bare_anchor(&content, &href)) {
                             content
                         } else {
                             format!("[{}]({})", content, href)
@@ -692,7 +690,7 @@ fn is_checkbox(attrs: &[(String, String)]) -> bool {
     attrs
         .iter()
         .find(|(k, _)| k == "type")
-        .map(|(_, v)| v.to_ascii_lowercase() == "checkbox")
+        .map(|(_, v)| v.eq_ignore_ascii_case("checkbox"))
         .unwrap_or(false)
 }
 

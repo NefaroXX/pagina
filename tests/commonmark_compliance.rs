@@ -213,8 +213,8 @@ fn update_pre_state(in_pre: &mut bool, line: &str) {
 /// Void elements per HTML5. Their self-closing form is normalized away
 /// (`<hr />` → `<hr>`) for consistency between renderers.
 const VOID_ELEMENTS: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-    "source", "track", "wbr",
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
 ];
 
 fn is_void_element(name: &str) -> bool {
@@ -241,9 +241,8 @@ fn normalize_tags(s: &str) -> String {
         if next == '!' || next == '?' || next == '/' {
             // Comment (`<!-- ... -->`), declaration, processing instruction or
             // closing tag: find the end and copy the whole construct verbatim.
-            let is_comment = next == '!'
-                && chars.get(i + 2) == Some(&'-')
-                && chars.get(i + 3) == Some(&'-');
+            let is_comment =
+                next == '!' && chars.get(i + 2) == Some(&'-') && chars.get(i + 3) == Some(&'-');
             let end = if is_comment {
                 find_comment_end(&chars, i).unwrap_or(n)
             } else {
@@ -334,12 +333,20 @@ fn parse_attributes(s: &str) -> Vec<(String, Option<String>)> {
             if let Some(inner) = after_eq.strip_prefix('"') {
                 let close = inner.find('"').unwrap_or(inner.len());
                 let v = inner[..close].to_string();
-                rest = if close < inner.len() { &inner[close + 1..] } else { "" };
+                rest = if close < inner.len() {
+                    &inner[close + 1..]
+                } else {
+                    ""
+                };
                 Some(v)
             } else if let Some(inner) = after_eq.strip_prefix('\'') {
                 let close = inner.find('\'').unwrap_or(inner.len());
                 let v = inner[..close].to_string();
-                rest = if close < inner.len() { &inner[close + 1..] } else { "" };
+                rest = if close < inner.len() {
+                    &inner[close + 1..]
+                } else {
+                    ""
+                };
                 Some(v)
             } else {
                 let v_end = after_eq.find(char::is_whitespace).unwrap_or(after_eq.len());
@@ -715,12 +722,22 @@ fn commonmark_compliance_run() {
 #[test]
 fn spec_file_parses_all_examples() {
     let examples = parse_spec(SPEC);
-    assert!((600..=700).contains(&examples.len()), "unexpected example count: {}", examples.len());
+    assert!(
+        (600..=700).contains(&examples.len()),
+        "unexpected example count: {}",
+        examples.len()
+    );
 
     // Example 1 lives in the "Tabs" section and uses a tab (→) in its input.
     assert_eq!(examples[0].section, "Tabs");
-    assert!(examples[0].markdown.contains('\t'), "tab replacement missing");
-    assert_eq!(examples[0].html, "<pre><code>foo\tbaz\t\tbim\n</code></pre>");
+    assert!(
+        examples[0].markdown.contains('\t'),
+        "tab replacement missing"
+    );
+    assert_eq!(
+        examples[0].html,
+        "<pre><code>foo\tbaz\t\tbim\n</code></pre>"
+    );
 
     // All examples must carry a non-empty section tag.
     for ex in examples.iter().take(50) {
@@ -741,19 +758,31 @@ fn normalize_whitespace_collapses_but_preserves_pre() {
 fn normalize_tags_sorts_attrs_and_fixes_void_slashes() {
     assert_eq!(normalize_tags("<hr />"), "<hr>");
     assert_eq!(normalize_tags("<br/>"), "<br>");
-    assert_eq!(normalize_tags("<img src=\"x\" alt=\"y\" />"), "<img alt=\"y\" src=\"x\">");
+    assert_eq!(
+        normalize_tags("<img src=\"x\" alt=\"y\" />"),
+        "<img alt=\"y\" src=\"x\">"
+    );
     assert_eq!(
         normalize_tags("<a title=\"a\" href=\"b\">x</a>"),
         "<a href=\"b\" title=\"a\">x</a>"
     );
     // Comments must pass through untouched.
-    assert_eq!(normalize_tags("<!-- <a b=\"c\"> <hr /> -->"), "<!-- <a b=\"c\"> <hr /> -->");
+    assert_eq!(
+        normalize_tags("<!-- <a b=\"c\"> <hr /> -->"),
+        "<!-- <a b=\"c\"> <hr /> -->"
+    );
 }
 
 #[test]
 fn normalize_entities_unifies_spellings() {
-    assert_eq!(normalize_entities("&#38; &#x26; &AMP;"), "&amp; &amp; &amp;");
-    assert_eq!(normalize_entities("&apos; &#x27; &#39;"), "&#39; &#39; &#39;");
+    assert_eq!(
+        normalize_entities("&#38; &#x26; &AMP;"),
+        "&amp; &amp; &amp;"
+    );
+    assert_eq!(
+        normalize_entities("&apos; &#x27; &#39;"),
+        "&#39; &#39; &#39;"
+    );
     assert_eq!(normalize_entities("&#x3C; &#60;"), "&lt; &lt;");
     // Unrelated entities pass through unchanged.
     assert_eq!(normalize_entities("&nbsp; &copy;"), "&nbsp; &copy;");

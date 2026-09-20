@@ -126,14 +126,29 @@ impl InlineElement {
 #[derive(Debug, Clone)]
 enum Tok {
     Text(String),
-    Delim { ch: char, len: usize, can_open: bool, can_close: bool },
-    OpenBracket { image: bool },
+    Delim {
+        ch: char,
+        len: usize,
+        can_open: bool,
+        can_close: bool,
+    },
+    OpenBracket {
+        image: bool,
+    },
     Code(String),
     RawHtml(String),
     HardBreak,
     SoftBreak,
-    Link { children: Vec<Tok>, url: String, title: Option<String> },
-    Image { children: Vec<Tok>, url: String, title: Option<String> },
+    Link {
+        children: Vec<Tok>,
+        url: String,
+        title: Option<String>,
+    },
+    Image {
+        children: Vec<Tok>,
+        url: String,
+        title: Option<String>,
+    },
 }
 
 fn is_ws(c: char) -> bool {
@@ -261,14 +276,19 @@ fn is_autolink_uri(s: &str) -> bool {
         Some(c) if c.is_ascii_alphabetic() => {}
         _ => return false,
     }
-    if !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-') {
+    if !scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
+    {
         return false;
     }
     let rest = &s[colon + 1..];
     if rest.is_empty() {
         return false;
     }
-    !rest.chars().any(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '<' || c == '>')
+    !rest
+        .chars()
+        .any(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '<' || c == '>')
 }
 
 fn is_autolink_email(s: &str) -> bool {
@@ -282,10 +302,10 @@ fn is_autolink_email(s: &str) -> bool {
     if local.is_empty() || domain.is_empty() {
         return false;
     }
-    if !local.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || ".!#$%&'*+/=?^_`{|}~-".contains(c)
-    }) {
+    if !local
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(c))
+    {
         return false;
     }
     if !domain.contains('.') {
@@ -305,7 +325,9 @@ fn is_autolink_email(s: &str) -> bool {
             return false;
         }
     }
-    if s.chars().any(|c| c == ' ' || c == '\t' || c == '<' || c == '>') {
+    if s.chars()
+        .any(|c| c == ' ' || c == '\t' || c == '<' || c == '>')
+    {
         return false;
     }
     true
@@ -460,7 +482,7 @@ fn scan_raw_tag(chars: &[char], i: usize) -> Option<usize> {
             return None;
         }
         // <!A ...> declaration: '!' + ASCII letter
-        let after = rest[1..].chars().next()?;
+        let after = rest.strip_prefix('!')?.chars().next()?;
         if after.is_ascii_alphabetic() {
             // find closing '>'
             let bytes = s.as_bytes();
@@ -675,8 +697,18 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
         if c == '\n' || c == '\r' {
             // Hard break if line ends with 2+ spaces; trailing whitespace is
             // stripped from the text (it is not rendered).
-            let trailing_spaces = text_buf.chars().rev().take_while(|x| *x == ' ' || *x == '\t').count();
-            let trimmed_len = text_buf.len() - text_buf.chars().rev().take_while(|x| *x == ' ' || *x == '\t').map(|x| x.len_utf8()).sum::<usize>();
+            let trailing_spaces = text_buf
+                .chars()
+                .rev()
+                .take_while(|x| *x == ' ' || *x == '\t')
+                .count();
+            let trimmed_len = text_buf.len()
+                - text_buf
+                    .chars()
+                    .rev()
+                    .take_while(|x| *x == ' ' || *x == '\t')
+                    .map(|x| x.len_utf8())
+                    .sum::<usize>();
             text_buf.truncate(trimmed_len);
             flush_text(&mut toks, &mut text_buf);
             if trailing_spaces >= 2 {
@@ -765,10 +797,6 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
         if c == '<' {
             if let Some((tok, next)) = scan_angle(&chars, i) {
                 flush_text(&mut toks, &mut text_buf);
-                match &tok {
-                    Tok::RawHtml(_) => {}
-                    _ => {}
-                }
                 prev_char = Some('x');
                 toks.push(tok);
                 i = next;
@@ -783,7 +811,12 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
         if c == '!' && i + 1 < chars.len() && chars[i + 1] == '[' {
             flush_text(&mut toks, &mut text_buf);
             toks.push(Tok::OpenBracket { image: true });
-            brackets.push(Bracket { tok_idx: toks.len() - 1, image: true, active: true, content_start: i + 2 });
+            brackets.push(Bracket {
+                tok_idx: toks.len() - 1,
+                image: true,
+                active: true,
+                content_start: i + 2,
+            });
             prev_char = Some('[');
             i += 2;
             continue;
@@ -792,7 +825,12 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
         if c == '[' {
             flush_text(&mut toks, &mut text_buf);
             toks.push(Tok::OpenBracket { image: false });
-            brackets.push(Bracket { tok_idx: toks.len() - 1, image: false, active: true, content_start: i + 1 });
+            brackets.push(Bracket {
+                tok_idx: toks.len() - 1,
+                image: false,
+                active: true,
+                content_start: i + 1,
+            });
             prev_char = Some('[');
             i += 1;
             continue;
@@ -866,22 +904,28 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                     // Images: children must not contain unescaped brackets? skip check.
                     toks.truncate(open_tok);
                     if is_image {
-                        toks.push(Tok::Image { children, url: dest, title });
+                        toks.push(Tok::Image {
+                            children,
+                            url: dest,
+                            title,
+                        });
                     } else {
-                        toks.push(Tok::Link { children, url: dest, title });
+                        toks.push(Tok::Link {
+                            children,
+                            url: dest,
+                            title,
+                        });
                         // A formed link deactivates earlier `[` openers so
                         // outer links cannot contain it (ex 518) — except
                         // inside an unclosed `![` image description, which
                         // resolves on its own (ex 520). Only brackets before
                         // the nearest unclosed image opener die (or all of
                         // them when no image is open).
-                        let kill_until = match brackets[..bi]
-                            .iter()
-                            .rposition(|b| b.active && b.image)
-                        {
-                            Some(p) => p,
-                            None => bi,
-                        };
+                        let kill_until =
+                            match brackets[..bi].iter().rposition(|b| b.active && b.image) {
+                                Some(p) => p,
+                                None => bi,
+                            };
                         for b in brackets.iter_mut().take(kill_until) {
                             if !b.image {
                                 b.active = false;
@@ -916,7 +960,11 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
             while i + len < chars.len() && chars[i + len] == c {
                 len += 1;
             }
-            let after = if i + len < chars.len() { Some(chars[i + len]) } else { None };
+            let after = if i + len < chars.len() {
+                Some(chars[i + len])
+            } else {
+                None
+            };
             let before = prev_char;
             let before_ws = before.map(is_ws).unwrap_or(true);
             let after_ws = after.map(is_ws).unwrap_or(true);
@@ -927,10 +975,18 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
             let (can_open, can_close) = if c == '*' || c == '~' {
                 (left, right)
             } else {
-                (left && (!right || before_punct), right && (!left || after_punct))
+                (
+                    left && (!right || before_punct),
+                    right && (!left || after_punct),
+                )
             };
             flush_text(&mut toks, &mut text_buf);
-            toks.push(Tok::Delim { ch: c, len, can_open, can_close });
+            toks.push(Tok::Delim {
+                ch: c,
+                len,
+                can_open,
+                can_close,
+            });
             prev_char = Some(c);
             i += len;
             continue;
@@ -989,7 +1045,12 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
     while ci < delims.len() {
         let c_idx = delims[ci];
         let (ch, c_len, c_open, c_close) = match &toks[c_idx] {
-            Tok::Delim { ch, len, can_open, can_close } => (*ch, *len, *can_open, *can_close),
+            Tok::Delim {
+                ch,
+                len,
+                can_open,
+                can_close,
+            } => (*ch, *len, *can_open, *can_close),
             _ => {
                 ci += 1;
                 continue;
@@ -1006,7 +1067,12 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             oi -= 1;
             let o_idx = delims[oi];
             let (o_ch, o_len, o_open, o_close) = match &toks[o_idx] {
-                Tok::Delim { ch, len, can_open, can_close } => (*ch, *len, *can_open, *can_close),
+                Tok::Delim {
+                    ch,
+                    len,
+                    can_open,
+                    can_close,
+                } => (*ch, *len, *can_open, *can_close),
                 _ => continue,
             };
             if o_ch != ch || !o_open {
@@ -1018,7 +1084,10 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
                 continue;
             }
             // Odd-match rule.
-            if (c_open || o_close) && ((o_len + c_len) % 3 == 0) && (o_len % 3 != 0 || c_len % 3 != 0) {
+            if (c_open || o_close)
+                && ((o_len + c_len) % 3 == 0)
+                && (o_len % 3 != 0 || c_len % 3 != 0)
+            {
                 continue;
             }
             // Boundary rule: opener and closer must sit at the same marker
@@ -1035,9 +1104,7 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
                 Tok::Delim { len, .. } => *len,
                 _ => 0,
             };
-            let use_len = if ch == '~' {
-                2
-            } else if o_len >= 2 && c_len >= 2 {
+            let use_len = if ch == '~' || (o_len >= 2 && c_len >= 2) {
                 2
             } else {
                 1
@@ -1045,7 +1112,11 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             // Extract inner tokens between opener and closer.
             let inner: Vec<Tok> = toks[o_idx + 1..c_idx].to_vec();
             // Build node.
-            let node = if use_len == 2 { Tok::Link { children: inner, url: String::new(), title: None } } else { Tok::Link { children: inner, url: String::new(), title: None } };
+            let node = Tok::Link {
+                children: inner,
+                url: String::new(),
+                title: None,
+            };
             // We use Link-with-empty-url as temporary strong/em marker? No —
             // instead directly splice Em/Strong via Text markers. Simplest:
             // replace range with marker tokens and convert later.
@@ -1057,10 +1128,20 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             let mut replacement: Vec<Tok> = Vec::new();
             if o_len > use_len {
                 let (och, o_open, o_close) = match &toks[o_idx] {
-                    Tok::Delim { ch, can_open, can_close, .. } => (*ch, *can_open, *can_close),
+                    Tok::Delim {
+                        ch,
+                        can_open,
+                        can_close,
+                        ..
+                    } => (*ch, *can_open, *can_close),
                     _ => (ch, true, false),
                 };
-                replacement.push(Tok::Delim { ch: och, len: o_len - use_len, can_open: o_open, can_close: o_close });
+                replacement.push(Tok::Delim {
+                    ch: och,
+                    len: o_len - use_len,
+                    can_open: o_open,
+                    can_close: o_close,
+                });
             }
             // emphasis node encoded as Link with special url? Avoid hack:
             // push placeholder then fix below by converting inner to elements.
@@ -1084,10 +1165,20 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             replacement.push(Tok::Code(format!("{}\x01", marker)));
             if c_len > use_len {
                 let (cch, co_open, co_close) = match &toks[c_idx] {
-                    Tok::Delim { ch, can_open, can_close, .. } => (*ch, *can_open, *can_close),
+                    Tok::Delim {
+                        ch,
+                        can_open,
+                        can_close,
+                        ..
+                    } => (*ch, *can_open, *can_close),
                     _ => (ch, false, true),
                 };
-                replacement.push(Tok::Delim { ch: cch, len: c_len - use_len, can_open: co_open, can_close: co_close });
+                replacement.push(Tok::Delim {
+                    ch: cch,
+                    len: c_len - use_len,
+                    can_open: co_open,
+                    can_close: co_close,
+                });
             }
             toks.splice(o_idx..=c_idx, replacement);
             // Rebuild delims index list (positions shifted) and restart the
@@ -1129,7 +1220,7 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                 i += 1;
             }
             Tok::Delim { ch, len, .. } => {
-                let s: String = std::iter::repeat(*ch).take(*len).collect();
+                let s: String = std::iter::repeat_n(*ch, *len).collect();
                 if let Some(InlineElement::Text(prev)) = out.last_mut() {
                     prev.push_str(&s);
                 } else {
@@ -1250,16 +1341,32 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                 out.push(InlineElement::SoftBreak);
                 i += 1;
             }
-            Tok::Link { children, url, title } => {
+            Tok::Link {
+                children,
+                url,
+                title,
+            } => {
                 let inner = toks_to_elements(children);
-                out.push(InlineElement::Link { text: inner, url: url.clone(), title: title.clone() });
+                out.push(InlineElement::Link {
+                    text: inner,
+                    url: url.clone(),
+                    title: title.clone(),
+                });
                 i += 1;
             }
-            Tok::Image { children, url, title } => {
+            Tok::Image {
+                children,
+                url,
+                title,
+            } => {
                 let inner = toks_to_elements(children);
                 // alt text: render inner as plain text (code -> content, em -> inner)
                 let alt = elements_to_plain(&inner);
-                out.push(InlineElement::Image { alt, url: url.clone(), title: title.clone() });
+                out.push(InlineElement::Image {
+                    alt,
+                    url: url.clone(),
+                    title: title.clone(),
+                });
                 i += 1;
             }
         }
@@ -1361,12 +1468,8 @@ fn linkify_elements(elems: Vec<InlineElement>) -> Vec<InlineElement> {
     for e in elems {
         match e {
             InlineElement::Text(s) => out.extend(linkify_text(&s)),
-            InlineElement::Bold(c) => {
-                out.push(InlineElement::Bold(linkify_elements_vec(c)))
-            }
-            InlineElement::Italic(c) => {
-                out.push(InlineElement::Italic(linkify_elements_vec(c)))
-            }
+            InlineElement::Bold(c) => out.push(InlineElement::Bold(linkify_elements_vec(c))),
+            InlineElement::Italic(c) => out.push(InlineElement::Italic(linkify_elements_vec(c))),
             InlineElement::Strikethrough(c) => {
                 out.push(InlineElement::Strikethrough(linkify_elements_vec(c)))
             }
@@ -1482,11 +1585,7 @@ fn finish_bare_url(
     let mut text: String = chars[start..end].iter().collect();
     // Trim trailing punctuation `?!.,:;*_~'"` plus unbalanced `)`.
     let mut trailing = 0usize;
-    loop {
-        let last = match text.chars().next_back() {
-            Some(c) => c,
-            None => break,
-        };
+    while let Some(last) = text.chars().next_back() {
         if matches!(
             last,
             '?' | '!' | '.' | ',' | ':' | ';' | '*' | '_' | '~' | '\'' | '"'
@@ -1563,10 +1662,7 @@ fn match_bare_email(chars: &[char], i: usize) -> Option<(String, String, usize)>
     }
     // Also stop before a trailing `.` run handled by validation trim.
     let word: String = chars[i..end].iter().collect();
-    let at = match word.rfind('@') {
-        Some(p) => p,
-        None => return None,
-    };
+    let at = word.rfind('@')?;
     // There must be no second `@` or whitespace inside; local part must be
     // non-empty and start at `i` (boundary already checked by caller).
     let (local, domain) = word.split_at(at);

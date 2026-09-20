@@ -24,12 +24,18 @@ enum Alignment {
 }
 
 #[derive(Debug, Clone)]
+// CommonMark uses these exact block-type terms ("HTML block", "block quote");
+// the variant names deliberately echo the enum name for spec traceability.
+#[allow(clippy::enum_variant_names)]
 enum Block {
     Paragraph(Vec<String>),
     Heading(u8, String),
     ThematicBreak,
     IndentedCode(Vec<String>),
-    FencedCode { info: String, lines: Vec<String> },
+    FencedCode {
+        info: String,
+        lines: Vec<String>,
+    },
     HtmlBlock(Vec<String>),
     BlockQuote(Vec<Block>),
     List {
@@ -197,7 +203,9 @@ fn parse_atx(line: &PLine) -> Option<(u8, String)> {
         let stripped_end = content.trim_end_matches('#');
         let hashes = &content[stripped_end.len()..];
         let before = stripped_end;
-        if !hashes.is_empty() && (before.is_empty() || before.ends_with(' ') || before.ends_with('\t')) {
+        if !hashes.is_empty()
+            && (before.is_empty() || before.ends_with(' ') || before.ends_with('\t'))
+        {
             content = before.trim_end().to_string();
         }
     }
@@ -283,14 +291,26 @@ fn parse_blockquote_marker(line: &PLine) -> Option<PLine> {
     let rest = t.s[1..].to_string();
     let cphase = (t.phase + 1) % 4;
     match rest.chars().next() {
-        None => Some(PLine { s: String::new(), phase: cphase, lazy: false }),
+        None => Some(PLine {
+            s: String::new(),
+            phase: cphase,
+            lazy: false,
+        }),
         Some(' ') => Some(PLine {
             s: rest[1..].to_string(),
             phase: (cphase + 1) % 4,
             lazy: false,
         }),
-        Some('\t') => Some(PLine { s: rest, phase: (cphase + 1) % 4, lazy: false }),
-        Some(_) => Some(PLine { s: rest, phase: cphase, lazy: false }),
+        Some('\t') => Some(PLine {
+            s: rest,
+            phase: (cphase + 1) % 4,
+            lazy: false,
+        }),
+        Some(_) => Some(PLine {
+            s: rest,
+            phase: cphase,
+            lazy: false,
+        }),
     }
 }
 
@@ -299,13 +319,68 @@ fn parse_blockquote_marker(line: &PLine) -> Option<PLine> {
 // ---------------------------------------------------------------------------
 
 const BLOCK_TAGS: &[&str] = &[
-    "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
-    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
-    "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
-    "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li",
-    "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option",
-    "p", "param", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
-    "thead", "title", "tr", "track", "ul",
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
 ];
 
 fn tag_name_at(s: &str) -> Option<(bool, String)> {
@@ -347,7 +422,7 @@ fn html_block_start(line: &PLine, in_paragraph: bool) -> Option<u8> {
     }
     // Type 4: declaration <!A...>
     if rest.starts_with('!') {
-        let nxt = rest[1..].chars().next()?;
+        let nxt = rest.strip_prefix('!')?.chars().next()?;
         if nxt.is_ascii_alphabetic() {
             return Some(4);
         }
@@ -363,8 +438,7 @@ fn html_block_start(line: &PLine, in_paragraph: bool) -> Option<u8> {
         let low = t.to_ascii_lowercase();
         let after_lt = &low[1..];
         for name in ["pre", "script", "style", "textarea"] {
-            if after_lt.starts_with(name) {
-                let rem = &after_lt[name.len()..];
+            if let Some(rem) = after_lt.strip_prefix(name) {
                 match rem.chars().next() {
                     Some(c) if c == ' ' || c == '\t' || c == '\n' || c == '>' || c == '/' => {
                         return Some(1)
@@ -646,7 +720,7 @@ fn split_row_cells(s: &str) -> Option<Vec<String>> {
         }
         let pipe_matched = offset > cell_end;
         if cell_end > start || pipe_matched {
-            let cell = unescape_pipes(&b_slice(s, start, cell_end));
+            let cell = unescape_pipes(b_slice(s, start, cell_end));
             cells.push(cell.trim().to_string());
         }
         expect_more = pipe_matched;
@@ -757,10 +831,7 @@ fn try_refdef(lines: &[PLine], i: usize) -> Option<(String, String, Option<Strin
     // Label may span lines (no blank lines inside); gather a small window.
     let mut lwin = t.clone();
     let mut lextra = 0usize;
-    while lextra < 3
-        && i + 1 + lextra < lines.len()
-        && !is_blank(&lines[i + 1 + lextra].s)
-    {
+    while lextra < 3 && i + 1 + lextra < lines.len() && !is_blank(&lines[i + 1 + lextra].s) {
         lwin.push('\n');
         lwin.push_str(&lines[i + 1 + lextra].s);
         lextra += 1;
@@ -807,10 +878,7 @@ fn try_refdef(lines: &[PLine], i: usize) -> Option<(String, String, Option<Strin
     let label_newlines = lc[..k].iter().filter(|c| **c == '\n').count();
     let mut window: String = lc[k..].iter().collect();
     let mut extra = lextra;
-    while i + 1 + extra < lines.len()
-        && !is_blank(&lines[i + 1 + extra].s)
-        && extra < 12
-    {
+    while i + 1 + extra < lines.len() && !is_blank(&lines[i + 1 + extra].s) && extra < 12 {
         window.push('\n');
         window.push_str(&lines[i + 1 + extra].s);
         extra += 1;
@@ -957,7 +1025,10 @@ fn try_refdef(lines: &[PLine], i: usize) -> Option<(String, String, Option<Strin
         return None;
     }
     let newlines = label_newlines
-        + wc[..end.min(wc.len())].iter().filter(|c| **c == '\n').count();
+        + wc[..end.min(wc.len())]
+            .iter()
+            .filter(|c| **c == '\n')
+            .count();
     let consumed = 1 + newlines;
     if consumed > extra + 1 || i + consumed > lines.len() {
         return None;
@@ -1032,24 +1103,27 @@ struct PLine {
 
 impl PLine {
     fn fresh(s: String) -> Self {
-        PLine { s, phase: 0, lazy: false }
+        PLine {
+            s,
+            phase: 0,
+            lazy: false,
+        }
     }
 }
 
 /// Strip all leading blockquote markers from a line, preserving the phase.
 /// Used to classify nested content.
 fn strip_all_bq_markers(line: &PLine) -> PLine {
-    let mut cur = PLine { s: line.s.clone(), phase: line.phase, lazy: false };
-    loop {
-        match parse_blockquote_marker(&cur) {
-            Some(rest) => {
-                if rest.s.len() == cur.s.len() {
-                    break;
-                }
-                cur = rest;
-            }
-            None => break,
+    let mut cur = PLine {
+        s: line.s.clone(),
+        phase: line.phase,
+        lazy: false,
+    };
+    while let Some(rest) = parse_blockquote_marker(&cur) {
+        if rest.s.len() == cur.s.len() {
+            break;
         }
+        cur = rest;
     }
     cur
 }
@@ -1082,15 +1156,26 @@ fn list_content_after(line: &PLine, m: &ListMarker) -> Option<PLine> {
     }
     match rest.chars().next().unwrap() {
         ' ' => {
-            let ws: String = rest.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let ws: String = rest
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
             if ws.contains('\t') {
                 let tp = rest.find('\t').unwrap();
                 // Content starts after the tab; phase = tab-stop end.
                 let beforelen = ws[..tp].len();
                 let endphase = (p0 + mw + beforelen + 4 - ((p0 + mw + beforelen) % 4)) % 4;
-                Some(PLine { s: rest[tp + 1..].to_string(), phase: endphase, lazy: false })
+                Some(PLine {
+                    s: rest[tp + 1..].to_string(),
+                    phase: endphase,
+                    lazy: false,
+                })
             } else if ws.len() >= 5 {
-                Some(PLine { s: rest[1..].to_string(), phase: (p0 + mw + 1) % 4, lazy: false })
+                Some(PLine {
+                    s: rest[1..].to_string(),
+                    phase: (p0 + mw + 1) % 4,
+                    lazy: false,
+                })
             } else {
                 Some(PLine {
                     s: rest[ws.len()..].to_string(),
@@ -1099,7 +1184,11 @@ fn list_content_after(line: &PLine, m: &ListMarker) -> Option<PLine> {
                 })
             }
         }
-        '\t' => Some(PLine { s: rest, phase: (p0 + mw + 1) % 4, lazy: false }),
+        '\t' => Some(PLine {
+            s: rest,
+            phase: (p0 + mw + 1) % 4,
+            lazy: false,
+        }),
         _ => None,
     }
     .filter(|c| !c.s.trim().is_empty())
@@ -1168,19 +1257,16 @@ fn parse_blocks(lines: &[PLine], refs: &mut RefDefs) -> Vec<Block> {
 
 /// Parse blocks, also returning each top-level block's consumed line span
 /// `[start, end)` in `lines` coordinates (used for tight/loose detection).
-fn parse_blocks_spanned(
-    lines: &[PLine],
-    refs: &mut RefDefs,
-) -> (Vec<Block>, Vec<(usize, usize)>) {
+fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec<(usize, usize)>) {
     let mut blocks: Vec<Block> = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut para: Vec<PLine> = Vec::new();
     let mut i = 0usize;
 
     let flush_para = |blocks: &mut Vec<Block>,
-                          spans: &mut Vec<(usize, usize)>,
-                          para: &mut Vec<PLine>,
-                          end: usize| {
+                      spans: &mut Vec<(usize, usize)>,
+                      para: &mut Vec<PLine>,
+                      end: usize| {
         if !para.is_empty() {
             let start = end - para.len();
             let texts: Vec<String> = para.iter().map(|l| l.s.clone()).collect();
@@ -1204,7 +1290,11 @@ fn parse_blocks_spanned(
         // Leading whitespace is stripped entirely.
         if lines[i].lazy {
             let stripped = strip_cols(&lines[i], lines[i].s.len() * 4 + 4);
-            para.push(PLine { s: stripped.s, phase: stripped.phase, lazy: true });
+            para.push(PLine {
+                s: stripped.s,
+                phase: stripped.phase,
+                lazy: true,
+            });
             i += 1;
             continue;
         }
@@ -1223,7 +1313,10 @@ fn parse_blocks_spanned(
             if i < lines.len() {
                 i += 1; // consume closing fence
             }
-            blocks.push(Block::FencedCode { info, lines: content });
+            blocks.push(Block::FencedCode {
+                info,
+                lines: content,
+            });
             spans.push((bs, i));
             continue;
         }
@@ -1272,7 +1365,11 @@ fn parse_blocks_spanned(
         if !para.is_empty() && !lines[i].lazy {
             if let Some(level) = parse_setext(&lines[i]) {
                 let ps = i - para.len();
-                let text = para.iter().map(|l| l.s.clone()).collect::<Vec<_>>().join("\n");
+                let text = para
+                    .iter()
+                    .map(|l| l.s.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 para.clear();
                 blocks.push(Block::Heading(level, text));
                 spans.push((ps, i + 1));
@@ -1295,9 +1392,7 @@ fn parse_blocks_spanned(
         if para.is_empty() && indent_rel(&lines[i]) >= 4 {
             let bs = i;
             let mut content: Vec<String> = Vec::new();
-            while i < lines.len()
-                && (is_blank(&lines[i].s) || indent_rel(&lines[i]) >= 4)
-            {
+            while i < lines.len() && (is_blank(&lines[i].s) || indent_rel(&lines[i]) >= 4) {
                 content.push(strip_cols(&lines[i], 4).s);
                 i += 1;
             }
@@ -1326,10 +1421,7 @@ fn parse_blocks_spanned(
                     // blank itself is left for the outer loop to skip.
                     break;
                 } else if !inner.is_empty()
-                    && inner
-                        .last()
-                        .map(|l| inner_para_open(l))
-                        .unwrap_or(false)
+                    && inner.last().map(inner_para_open).unwrap_or(false)
                     && !is_interrupting_block_start(&lines[i], true)
                 {
                     // Lazy continuation line (only into an open paragraph).
@@ -1471,11 +1563,7 @@ fn parse_blocks_spanned(
 /// Parse a full list starting at `start`. Returns (block, next index).
 /// All indentation is frame-relative (spec ex 259-260); tab phases ride
 /// along in each line.
-fn parse_list(
-    lines: &[PLine],
-    start: usize,
-    refs: &mut RefDefs,
-) -> (Block, usize) {
+fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usize) {
     let first = parse_list_marker(&lines[start]).expect("list marker");
     let ordered = first.ordered;
     let delim = first.delim;
@@ -1492,13 +1580,15 @@ fn parse_list(
     let first_line_content = |line: &PLine, m: &ListMarker| -> PLine {
         match list_content_after(line, m) {
             Some(c) => c,
-            None => PLine { s: String::new(), phase: 0, lazy: false },
+            None => PLine {
+                s: String::new(),
+                phase: 0,
+                lazy: false,
+            },
         }
     };
     // Strip an indented content line down by `ci` columns.
-    let strip_to = |line: &PLine, ci: usize| -> PLine {
-        strip_cols(line, ci)
-    };
+    let strip_to = |line: &PLine, ci: usize| -> PLine { strip_cols(line, ci) };
 
     let mut ci = first.content_indent;
     let mut cur: Vec<PLine> = vec![first_line_content(&lines[i], &first)];
@@ -1565,24 +1655,28 @@ fn parse_list(
         // Same-type new item? (A thematic break line ends the list instead.)
         if !is_thematic_break(line) {
             if let Some(m2) = parse_list_marker(line) {
-            let same = m2.ordered == ordered
-                && (if ordered { m2.delim == delim } else { m2.bullet == bullet })
-                && indent_rel(line) < ci;
-            if same {
-                // Exception: empty item directly after... always new item.
-                items_raw.push(std::mem::take(&mut cur));
-                ci = m2.content_indent;
-                cur = vec![first_line_content(line, &m2)];
-                i += 1;
-                continue;
-            }
-            // Different-type marker: could be sublist content if indented.
-            if indent_rel(line) >= ci {
-                cur.push(strip_to(line, ci));
-                i += 1;
-                continue;
-            }
-            break;
+                let same = m2.ordered == ordered
+                    && (if ordered {
+                        m2.delim == delim
+                    } else {
+                        m2.bullet == bullet
+                    })
+                    && indent_rel(line) < ci;
+                if same {
+                    // Exception: empty item directly after... always new item.
+                    items_raw.push(std::mem::take(&mut cur));
+                    ci = m2.content_indent;
+                    cur = vec![first_line_content(line, &m2)];
+                    i += 1;
+                    continue;
+                }
+                // Different-type marker: could be sublist content if indented.
+                if indent_rel(line) >= ci {
+                    cur.push(strip_to(line, ci));
+                    i += 1;
+                    continue;
+                }
+                break;
             }
         }
         // Indented content line.
@@ -1596,7 +1690,7 @@ fn parse_list(
         let last_is_para = cur
             .iter()
             .rfind(|l| !l.s.is_empty())
-            .map(|l| inner_para_open(l))
+            .map(inner_para_open)
             .unwrap_or(false);
         if last_is_para && !is_interrupting_block_start(line, true) {
             let mut lazy = strip_cols(line, 3);
