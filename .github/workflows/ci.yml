@@ -2,31 +2,50 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
-
   test:
-    name: Test
+    name: Test (default features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+
+  test-frontmatter:
+    name: Test (frontmatter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features frontmatter
+
+  test-sanitize:
+    name: Test (sanitize)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features sanitize
+
+  # CommonMark compliance gate: runs the #[ignore]d full-spec sweep
+  # (`tests/commonmark_compliance.rs`), which asserts the spec parsed fully.
+  # Pass/fail only — the test fails on any regression.
+  compliance:
+    name: Compliance (commonmark, ignored)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test commonmark_compliance -- --ignored
 
   fmt:
     name: Format
@@ -47,12 +66,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
-  publish-check:
-    name: Publish Check
+  # Host-side check of the optional WASM bindings; no wasm32 target needed.
+  wasm-check:
+    name: Check (wasm)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --dry-run
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --features wasm
