@@ -88,8 +88,15 @@ cargo check --features wasm
 
 # Size-optimized WASM build (needs the wasm32 target + wasm-pack)
 rustup target add wasm32-unknown-unknown
-wasm-pack build --target bundler --features wasm
+RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc wasm-pack build --target bundler --features wasm
 # or: cargo build --profile wasm --target wasm32-unknown-unknown --features wasm
+
+# Rename before publish: wasm-pack names the npm package after the
+# crate ("pagina", taken on npm). pkg/ is git-ignored, so re-apply
+# after every fresh build:
+#   edit pkg/package.json -> "name": "pagina-wasm"
+#   cd pkg && npm publish
+# Live as pagina-wasm@0.1.0: https://www.npmjs.com/package/pagina-wasm
 ```
 
 `Cargo.toml` ships a `[profile.wasm]` size profile (`opt-level = "z"`,
