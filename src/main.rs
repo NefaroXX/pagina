@@ -22,8 +22,8 @@ fn run() -> Result<()> {
             print_version();
             Ok(())
         }
-        Subcommand::ToHtml { input, output } => convert_to_html(&input, &output),
-        Subcommand::ToMd { input, output } => convert_to_md(&input, &output),
+        Subcommand::ToHtml { input, output, gfm } => convert_to_html(&input, &output, gfm),
+        Subcommand::ToMd { input, output, gfm } => convert_to_md(&input, &output, gfm),
     }
 }
 
@@ -66,9 +66,13 @@ fn write_output(path: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn convert_to_html(input_path: &str, output_path: &str) -> Result<()> {
+fn convert_to_html(input_path: &str, output_path: &str, gfm: bool) -> Result<()> {
     let input = read_input(input_path)?;
-    let html = pagina::markdown_to_html::convert(&input)?;
+    let html = if gfm {
+        pagina::markdown_to_html::convert_gfm(&input)?
+    } else {
+        pagina::markdown_to_html::convert(&input)?
+    };
     write_output(output_path, &html)?;
     if input_path != "-" && output_path != "-" {
         println!("Converted {} -> {}", input_path, output_path);
@@ -76,9 +80,13 @@ fn convert_to_html(input_path: &str, output_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn convert_to_md(input_path: &str, output_path: &str) -> Result<()> {
+fn convert_to_md(input_path: &str, output_path: &str, gfm: bool) -> Result<()> {
     let input = read_input(input_path)?;
-    let markdown = pagina::html_to_markdown::convert(&input)?;
+    let markdown = if gfm {
+        pagina::html_to_markdown::convert_gfm(&input)?
+    } else {
+        pagina::html_to_markdown::convert(&input)?
+    };
     write_output(output_path, &markdown)?;
     if input_path != "-" && output_path != "-" {
         println!("Converted {} -> {}", input_path, output_path);

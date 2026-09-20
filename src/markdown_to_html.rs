@@ -1,7 +1,8 @@
 use crate::error::Result;
-use crate::html_escape::{escape_html, escape_href, unescape_html};
+use crate::html_escape::{escape_href, escape_html, unescape_html};
 use crate::inline_parser::{
-    normalize_label, parse_inline_with_refs, render_inline_html, tag_end_len, RefDefs,
+    normalize_label, parse_inline_with_refs, parse_inline_with_refs_gfm, render_inline_html,
+    tag_end_len, RefDefs,
 };
 
 // NOTE on raw HTML: per CommonMark, HTML blocks (types 1-7) and inline raw
@@ -1656,14 +1657,58 @@ fn parse_list(
 // Rendering
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn render_blocks(blocks: &[Block], refs: &RefDefs, out: &mut String) {
+    render_blocks_opts(blocks, refs, false, out);
+}
+
+fn render_blocks_opts(blocks: &[Block], refs: &RefDefs, gfm: bool, out: &mut String) {
     for b in blocks {
-        render_block(b, refs, out);
+        render_block_opts(b, refs, gfm, out);
     }
 }
 
+#[allow(dead_code)]
 fn render_inline_text(s: &str, refs: &RefDefs) -> String {
-    render_inline_html(&parse_inline_with_refs(s, refs))
+    render_inline_text_opts(s, refs, false)
+}
+
+fn render_inline_text_opts(s: &str, refs: &RefDefs, gfm: bool) -> String {
+    if gfm {
+        render_inline_html(&parse_inline_with_refs_gfm(s, refs))
+    } else {
+        render_inline_html(&parse_inline_with_refs(s, refs))
+    }
+}
+
+/// Strip a GFM task-list prefix (`[ ]`, `[x]`/`[X]` + whitespace/EOL) from
+/// the start of a list item's first paragraph. Returns (checked, rest).
+fn strip_task_prefix(s: &str) -> Option<(bool, String)> {
+    let b = s.as_bytes();
+    if b.len() < 3 || b[0] != b'[' || b[2] != b']' {
+        return None;
+    }
+    let checked = match b[1] {
+        b' ' => false,
+        b'x' | b'X' => true,
+        _ => return None,
+    };
+    let rest = &s[3..];
+    if rest.is_empty() {
+        return Some((checked, String::new()));
+    }
+    match rest.chars().next().unwrap() {
+        ' ' | '\t' | '\n' => Some((checked, rest[1..].to_string())),
+        _ => None,
+    }
+}
+
+fn task_checkbox(checked: bool) -> &'static str {
+    if checked {
+        "<input type=\"checkbox\" checked=\"\" disabled=\"\" /> "
+    } else {
+        "<input type=\"checkbox\" disabled=\"\" /> "
+    }
 }
 
 /// First word of a fenced-code info string, with backslash escapes and
@@ -1688,17 +1733,22 @@ fn clean_info_word(info: &str) -> String {
     unescape_html(&out)
 }
 
+#[allow(dead_code)]
 fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
+    render_block_opts(b, refs, false, out);
+}
+
+fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
     match b {
         Block::Paragraph(lines) => {
             let text = lines.join("\n");
             out.push_str("<p>");
-            out.push_str(&render_inline_text(&text, refs));
+            out.push_str(&render_inline_text_opts(&text, refs, gfm));
             out.push_str("</p>\n");
         }
         Block::Heading(level, content) => {
             out.push_str(&format!("<h{}>", level));
-            out.push_str(&render_inline_text(content, refs));
+            out.push_str(&render_inline_text_opts(content, refs, gfm));
             out.push_str(&format!("</h{}>\n", level));
         }
         Block::ThematicBreak => {
@@ -1743,58 +1793,16 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
         }
         Block::BlockQuote(children) => {
             out.push_str("<blockquote>\n");
-            render_blocks(children, refs, out);
+            render_blocks_opts(children, refs, gfm, out);
             out.push_str("</blockquote>\n");
         }
-        Block::List { ordered, start, tight, items } => {
-            if *ordered {
-                if *start != 1 {
-                    out.push_str(&format!("<ol start=\"{}\">\n", start));
-                } else {
-                    out.push_str("<ol>\n");
-                }
-            } else {
-                out.push_str("<ul>\n");
-            }
-            for item in items {
-                if *tight {
-                    // Tight list: paragraphs render without <p>. Children
-                    // are joined with newlines; `</li>` follows the last
-                    // child directly (`<li>foo</li>`, `<li>foo\n<ul>…`).
-                    out.push_str("<li>");
-                    for (k, b) in item.iter().enumerate() {
-                        match b {
-                            Block::Paragraph(lines) => {
-                                let inline =
-                                    render_inline_text(&lines.join("\n"), refs);
-                                if k > 0 && !out.ends_with('\n') {
-                                    out.push('\n');
-                                }
-                                out.push_str(&inline);
-                            }
-                            _ => {
-                                if !out.ends_with('\n') {
-                                    out.push('\n');
-                                }
-                                render_block(b, refs, out);
-                            }
-                        }
-                    }
-                    out.push_str("</li>\n");
-                } else if item.is_empty() {
-                    out.push_str("<li></li>\n");
-                } else {
-                    // Loose list: always block form (`<li>` on its own line).
-                    out.push_str("<li>\n");
-                    render_blocks(item, refs, out);
-                    out.push_str("</li>\n");
-                }
-            }
-            if *ordered {
-                out.push_str("</ol>\n");
-            } else {
-                out.push_str("</ul>\n");
-            }
+        Block::List {
+            ordered,
+            start,
+            tight,
+            items,
+        } => {
+            render_list(ordered, start, tight, items, refs, gfm, out);
         }
         Block::Table {
             header,
@@ -1806,7 +1814,7 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
                 out.push_str("<th");
                 append_alignment(out, alignments.get(k).copied().unwrap_or(Alignment::None));
                 out.push('>');
-                out.push_str(&render_inline_text(cell, refs));
+                out.push_str(&render_inline_text_opts(cell, refs, gfm));
                 out.push_str("</th>\n");
             }
             out.push_str("</tr>\n</thead>\n");
@@ -1821,7 +1829,7 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
                             alignments.get(k).copied().unwrap_or(Alignment::None),
                         );
                         out.push('>');
-                        out.push_str(&render_inline_text(cell, refs));
+                        out.push_str(&render_inline_text_opts(cell, refs, gfm));
                         out.push_str("</td>\n");
                     }
                     out.push_str("</tr>\n");
@@ -1830,6 +1838,118 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
             }
             out.push_str("</table>\n");
         }
+    }
+}
+
+/// Render a list, applying the GFM task-list extension when `gfm` is set:
+/// a list item whose first block is a paragraph starting with `[ ]` /
+/// `[x]`/`[X]` renders a disabled checkbox and the remainder text. Tables
+/// are intentionally NOT gated (always-on GFM exception, spec-neutral).
+fn render_list(
+    ordered: &bool,
+    start: &u32,
+    tight: &bool,
+    items: &[Vec<Block>],
+    refs: &RefDefs,
+    gfm: bool,
+    out: &mut String,
+) {
+    if *ordered {
+        if *start != 1 {
+            out.push_str(&format!("<ol start=\"{}\">\n", start));
+        } else {
+            out.push_str("<ol>\n");
+        }
+    } else {
+        out.push_str("<ul>\n");
+    }
+    for item in items {
+        // GFM task marker: first block is a paragraph with the bracket
+        // prefix. The prefix is stripped in place (clone) for rendering.
+        let mut task: Option<bool> = None;
+        let mut item_view: Vec<Block> = item.to_vec();
+        if gfm {
+            if let Some(Block::Paragraph(lines)) = item_view.first() {
+                let text = lines.join("\n");
+                if let Some((checked, rest)) = strip_task_prefix(&text) {
+                    task = Some(checked);
+                    let rest_lines: Vec<String> = rest.split('\n').map(|s| s.to_string()).collect();
+                    if rest_lines.len() == 1 && rest_lines[0].is_empty() {
+                        item_view[0] = Block::Paragraph(Vec::new());
+                    } else {
+                        item_view[0] = Block::Paragraph(rest_lines);
+                    }
+                }
+            }
+        }
+        let checkbox = task.map(task_checkbox).unwrap_or("");
+        if *tight {
+            // Tight list: paragraphs render without <p>. Children
+            // are joined with newlines; `</li>` follows the last
+            // child directly (`<li>foo</li>`, `<li>foo\n<ul>…`).
+            out.push_str("<li>");
+            let mut first_inline = true;
+            for (k, b) in item_view.iter().enumerate() {
+                match b {
+                    Block::Paragraph(lines) => {
+                        let inline = render_inline_text_opts(&lines.join("\n"), refs, gfm);
+                        if k > 0 && !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        if first_inline {
+                            out.push_str(checkbox);
+                            first_inline = false;
+                        }
+                        out.push_str(&inline);
+                    }
+                    _ => {
+                        if !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        render_block_opts(b, refs, gfm, out);
+                    }
+                }
+            }
+            // Empty tight item with a task marker still shows the box.
+            if item_view.is_empty() {
+                out.push_str(checkbox.trim_end());
+            }
+            out.push_str("</li>\n");
+        } else if item_view.is_empty()
+            || (item_view.len() == 1
+                && matches!(item_view.first(), Some(Block::Paragraph(v)) if v.is_empty()))
+        {
+            if task.is_some() {
+                out.push_str("<li>\n");
+                out.push_str(&format!("<p>{}</p>\n", checkbox.trim_end()));
+                out.push_str("</li>\n");
+            } else {
+                out.push_str("<li></li>\n");
+            }
+        } else {
+            // Loose list: always block form (`<li>` on its own line).
+            // The checkbox lives inside the first paragraph (`<p><input…
+            out.push_str("<li>\n");
+            let mut rendered_first = false;
+            for b in item_view.iter() {
+                match b {
+                    Block::Paragraph(lines) if !rendered_first => {
+                        rendered_first = true;
+                        out.push_str("<p>");
+                        out.push_str(checkbox);
+                        out.push_str(&render_inline_text_opts(&lines.join("\n"), refs, gfm));
+                        out.push_str("</p>\n");
+                    }
+                    _ => render_block_opts(b, refs, gfm, out),
+                }
+            }
+            out.push_str("</li>\n");
+        }
+    }
+    if *ordered {
+        out.push_str("</ol>\n");
+    } else {
+        out.push_str("</ul>\n");
     }
 }
 
@@ -1844,7 +1964,34 @@ fn append_alignment(out: &mut String, a: Alignment) {
     out.push_str(&format!(" align=\"{}\"", attr));
 }
 
+/// Conversion options for Markdown → HTML.
+///
+/// `gfm: false` (the default) is pure CommonMark 0.31.2: `~~`, task-list
+/// brackets and bare `http(s)://`/`www.`/emails stay literal. `gfm: true`
+/// additionally enables task-list checkboxes, `~~` strikethrough (`<del>`)
+/// and bare autolinks.
+///
+/// Tables are the one always-on GFM exception and render in both modes
+/// (the CommonMark spec has no pipe-table tests, so compliance is
+/// unaffected).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// Enable GFM extensions (task lists, strikethrough, bare autolinks).
+    pub gfm: bool,
+}
+
+impl Options {
+    /// Options with GFM extensions enabled.
+    pub fn gfm() -> Self {
+        Options { gfm: true }
+    }
+}
+
 /// Convert a Markdown string to HTML (CommonMark 0.31.2 core).
+///
+/// Pure CommonMark: GFM extensions stay literal. Pipe tables are the single
+/// always-on exception (spec-neutral). For opt-in GFM, see
+/// [`convert_gfm`] / [`convert_with`].
 ///
 /// Supports ATX/setext headings, thematic breaks, indented/fenced code,
 /// HTML blocks (verbatim passthrough), blockquotes, ordered/bulleted lists
@@ -1859,6 +2006,11 @@ fn append_alignment(out: &mut String, a: Alignment) {
 /// assert_eq!(html, "<h1>Hello</h1>\n");
 /// ```
 pub fn convert(input: &str) -> Result<String> {
+    convert_with(input, Options::default())
+}
+
+/// Convert Markdown to HTML with explicit [`Options`].
+pub fn convert_with(input: &str, options: Options) -> Result<String> {
     // Split into lines (strip \r; keep tabs verbatim for tab-stop logic).
     let raw: Vec<String> = input
         .replace("\r\n", "\n")
@@ -1880,8 +2032,21 @@ pub fn convert(input: &str) -> Result<String> {
     let _ = parse_blocks(&lines, &mut refs);
     let blocks = parse_blocks(&lines, &mut refs);
     let mut out = String::new();
-    render_blocks(&blocks, &refs, &mut out);
+    render_blocks_opts(&blocks, &refs, options.gfm, &mut out);
     Ok(out)
+}
+
+/// Convert Markdown to HTML with GFM extensions enabled (task lists,
+/// strikethrough, bare autolinks; tables render in both modes).
+///
+/// # Examples
+///
+/// ```
+/// let html = pagina::markdown_to_html::convert_gfm("~~hi~~").unwrap();
+/// assert!(html.contains("<del>hi</del>"));
+/// ```
+pub fn convert_gfm(input: &str) -> Result<String> {
+    convert_with(input, Options::gfm())
 }
 
 #[cfg(test)]

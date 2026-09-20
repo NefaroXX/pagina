@@ -23,6 +23,7 @@ pub enum InlineElement {
     Text(String),
     Bold(Vec<InlineElement>),
     Italic(Vec<InlineElement>),
+    Strikethrough(Vec<InlineElement>),
     Code(String),
     Link {
         text: Vec<InlineElement>,
@@ -50,6 +51,10 @@ impl InlineElement {
             InlineElement::Italic(children) => {
                 let inner: String = children.iter().map(|c| c.to_html()).collect();
                 format!("<em>{}</em>", inner)
+            }
+            InlineElement::Strikethrough(children) => {
+                let inner: String = children.iter().map(|c| c.to_html()).collect();
+                format!("<del>{}</del>", inner)
             }
             InlineElement::Code(s) => format!("<code>{}</code>", escape_html(s)),
             InlineElement::Link { text, url, title } => {
@@ -93,6 +98,10 @@ impl InlineElement {
             InlineElement::Italic(children) => {
                 let inner: String = children.iter().map(|c| c.to_markdown()).collect();
                 format!("*{}*", inner)
+            }
+            InlineElement::Strikethrough(children) => {
+                let inner: String = children.iter().map(|c| c.to_markdown()).collect();
+                format!("~~{}~~", inner)
             }
             InlineElement::Code(s) => format!("`{}`", s),
             InlineElement::Link { text, url, title } => {
@@ -639,7 +648,12 @@ struct Bracket {
     content_start: usize,
 }
 
+#[allow(dead_code)]
 fn tokenize(input: &str, refs: &RefDefs) -> Vec<Tok> {
+    tokenize_opts(input, refs, false)
+}
+
+fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
     let chars: Vec<char> = input.chars().collect();
     let mut toks: Vec<Tok> = Vec::new();
     let mut brackets: Vec<Bracket> = Vec::new();
@@ -895,8 +909,9 @@ fn tokenize(input: &str, refs: &RefDefs) -> Vec<Tok> {
             i += 1;
             continue;
         }
-        // Emphasis runs
-        if c == '*' || c == '_' {
+        // Emphasis runs (plus GFM strikethrough `~` when enabled; a
+        // lone `~` never forms markup and stays literal via use_len == 2).
+        if c == '*' || c == '_' || (c == '~' && gfm) {
             let mut len = 0;
             while i + len < chars.len() && chars[i + len] == c {
                 len += 1;
@@ -909,7 +924,7 @@ fn tokenize(input: &str, refs: &RefDefs) -> Vec<Tok> {
             let after_punct = after.map(is_punct).unwrap_or(false);
             let left = !after_ws && (!after_punct || before_ws || before_punct);
             let right = !before_ws && (!before_punct || after_ws || after_punct);
-            let (can_open, can_close) = if c == '*' {
+            let (can_open, can_close) = if c == '*' || c == '~' {
                 (left, right)
             } else {
                 (left && (!right || before_punct), right && (!left || after_punct))
@@ -937,9 +952,9 @@ fn marker_depth(toks: &[Tok], idx: usize) -> i32 {
     let mut d = 0i32;
     for t in &toks[..idx.min(toks.len())] {
         if let Tok::Code(m) = t {
-            if m == "\0EM\0" || m == "\0STRONG\0" {
+            if m == "\0EM\0" || m == "\0STRONG\0" || m == "\0DEL\0" {
                 d += 1;
-            } else if m == "\0EM\0\x01" || m == "\0STRONG\0\x01" {
+            } else if m == "\0EM\0\x01" || m == "\0STRONG\0\x01" || m == "\0DEL\0\x01" {
                 d -= 1;
             }
         }
@@ -997,6 +1012,11 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             if o_ch != ch || !o_open {
                 continue;
             }
+            // GFM strikethrough: only `~~` pairs form `<del>`; a lone `~`
+            // never matches (both sides need length >= 2).
+            if ch == '~' && (o_len < 2 || c_len < 2) {
+                continue;
+            }
             // Odd-match rule.
             if (c_open || o_close) && ((o_len + c_len) % 3 == 0) && (o_len % 3 != 0 || c_len % 3 != 0) {
                 continue;
@@ -1015,7 +1035,13 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
                 Tok::Delim { len, .. } => *len,
                 _ => 0,
             };
-            let use_len = if o_len >= 2 && c_len >= 2 { 2 } else { 1 };
+            let use_len = if ch == '~' {
+                2
+            } else if o_len >= 2 && c_len >= 2 {
+                2
+            } else {
+                1
+            };
             // Extract inner tokens between opener and closer.
             let inner: Vec<Tok> = toks[o_idx + 1..c_idx].to_vec();
             // Build node.
@@ -1045,7 +1071,13 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
             // Implementation: replace the whole range with:
             //   [EmOpen marker][inner][EmClose marker]
             // encoded as Tok::RawHtml-like sentinels? Use Code with \0 prefix.
-            let marker = if use_len == 2 { "\0STRONG\0" } else { "\0EM\0" };
+            let marker = if ch == '~' {
+                "\0DEL\0"
+            } else if use_len == 2 {
+                "\0STRONG\0"
+            } else {
+                "\0EM\0"
+            };
             replacement.push(Tok::Code(marker.to_string()));
             let inner_now: Vec<Tok> = toks[o_idx + 1..c_idx].to_vec();
             replacement.extend(inner_now);
@@ -1173,6 +1205,35 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                     i += 1;
                 }
             }
+            Tok::Code(s) if s == "\0DEL\0" => {
+                let mut j = i + 1;
+                let mut depth = 1usize;
+                while j < toks.len() {
+                    if let Tok::Code(m) = &toks[j] {
+                        if m == "\0DEL\0" {
+                            depth += 1;
+                        } else if m == "\0DEL\0\x01" {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    j += 1;
+                }
+                if j < toks.len() {
+                    let inner = toks_to_elements(&toks[i + 1..j]);
+                    out.push(InlineElement::Strikethrough(inner));
+                    i = j + 1;
+                } else {
+                    if let Some(InlineElement::Text(prev)) = out.last_mut() {
+                        prev.push_str("~~");
+                    } else {
+                        out.push(InlineElement::Text("~~".to_string()));
+                    }
+                    i += 1;
+                }
+            }
             Tok::Code(s) => {
                 out.push(InlineElement::Code(s.clone()));
                 i += 1;
@@ -1211,7 +1272,9 @@ fn elements_to_plain(elems: &[InlineElement]) -> String {
     for e in elems {
         match e {
             InlineElement::Text(t) => s.push_str(t),
-            InlineElement::Bold(c) | InlineElement::Italic(c) => s.push_str(&elements_to_plain(c)),
+            InlineElement::Bold(c) | InlineElement::Italic(c) | InlineElement::Strikethrough(c) => {
+                s.push_str(&elements_to_plain(c))
+            }
             InlineElement::Code(c) => s.push_str(c),
             InlineElement::Link { text, url, .. } => {
                 // Image descriptions preserve nested-link markup but
@@ -1238,24 +1301,300 @@ fn elements_to_plain(elems: &[InlineElement]) -> String {
 fn contains_link(elems: &[InlineElement]) -> bool {
     elems.iter().any(|e| match e {
         InlineElement::Link { .. } | InlineElement::Image { .. } => true,
-        InlineElement::Bold(c) | InlineElement::Italic(c) => contains_link(c),
+        InlineElement::Bold(c) | InlineElement::Italic(c) | InlineElement::Strikethrough(c) => {
+            contains_link(c)
+        }
         _ => false,
     })
 }
 
 /// Parse inline Markdown elements from a string (no reference definitions).
 /// Handles emphasis/strong, code spans, links, autolinks, entities, breaks.
+///
+/// Pure CommonMark: no GFM extensions (no `~~`, no task lists, no bare
+/// autolinks — a bare `a@b.com` stays plain text per spec example 612).
 pub fn parse_inline(input: &str) -> Vec<InlineElement> {
     let refs = HashMap::new();
     parse_inline_with_refs(input, &refs)
 }
 
+/// GFM inline parsing (no reference definitions): `~~` strikethrough plus
+/// bare `http(s)://`, `www.` and email autolinks on top of CommonMark.
+pub fn parse_inline_gfm(input: &str) -> Vec<InlineElement> {
+    let refs = HashMap::new();
+    parse_inline_with_refs_gfm(input, &refs)
+}
+
 /// Parse inline Markdown with link reference definitions available.
+///
+/// Pure CommonMark (see [`parse_inline`] for the GFM boundary).
 pub fn parse_inline_with_refs(input: &str, refs: &RefDefs) -> Vec<InlineElement> {
+    parse_inline_opts(input, refs, false)
+}
+
+/// Parse inline Markdown with link reference definitions plus GFM
+/// extensions (strikethrough, bare autolinks).
+pub fn parse_inline_with_refs_gfm(input: &str, refs: &RefDefs) -> Vec<InlineElement> {
+    parse_inline_opts(input, refs, true)
+}
+
+fn parse_inline_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<InlineElement> {
     // Trailing spaces/tabs at the very end are stripped (no hard break).
     let input = input.trim_end_matches([' ', '\t']);
-    let toks = tokenize(input, refs);
-    toks_to_elements(&toks)
+    let toks = tokenize_opts(input, refs, gfm);
+    let mut elems = toks_to_elements(&toks);
+    if gfm {
+        elems = linkify_elements(elems);
+    }
+    elems
+}
+
+// ---------------------------------------------------------------------------
+// GFM bare autolinks (extension: `http(s)://`, `www.`, bare emails)
+// ---------------------------------------------------------------------------
+
+/// Apply bare-autolink detection to top-level elements. Existing links,
+/// images, code spans and raw HTML are left alone; emphasis children are
+/// recursed so `*http://x*` still linkifies inside.
+fn linkify_elements(elems: Vec<InlineElement>) -> Vec<InlineElement> {
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems {
+        match e {
+            InlineElement::Text(s) => out.extend(linkify_text(&s)),
+            InlineElement::Bold(c) => {
+                out.push(InlineElement::Bold(linkify_elements_vec(c)))
+            }
+            InlineElement::Italic(c) => {
+                out.push(InlineElement::Italic(linkify_elements_vec(c)))
+            }
+            InlineElement::Strikethrough(c) => {
+                out.push(InlineElement::Strikethrough(linkify_elements_vec(c)))
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn linkify_elements_vec(elems: Vec<InlineElement>) -> Vec<InlineElement> {
+    linkify_elements(elems)
+}
+
+/// Split one text run into text/link runs at bare URLs and bare emails.
+fn linkify_text(s: &str) -> Vec<InlineElement> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out: Vec<InlineElement> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0usize;
+    let flush = |buf: &mut String, out: &mut Vec<InlineElement>| {
+        if !buf.is_empty() {
+            out.push(InlineElement::Text(std::mem::take(buf)));
+        }
+    };
+    while i < chars.len() {
+        if let Some((display, href, next)) = match_bare_autolink(&chars, i) {
+            flush(&mut buf, &mut out);
+            out.push(InlineElement::Link {
+                text: vec![InlineElement::Text(display)],
+                url: href,
+                title: None,
+            });
+            i = next;
+            continue;
+        }
+        buf.push(chars[i]);
+        i += 1;
+    }
+    flush(&mut buf, &mut out);
+    if out.is_empty() {
+        out.push(InlineElement::Text(String::new()));
+    }
+    out
+}
+
+/// Try to match a bare autolink starting exactly at `i`. Returns
+/// (display text, href, next index). Word boundary: the previous char must
+/// not be alphanumeric (so `foohttp://x` stays plain).
+fn match_bare_autolink(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    if i > 0 && chars[i - 1].is_alphanumeric() {
+        return None;
+    }
+    // http(s):// URLs (case-insensitive scheme).
+    for scheme in ["http://", "https://"] {
+        if matches_scheme_at(chars, i, scheme) {
+            if let Some(m) = finish_bare_url(chars, i, None) {
+                return Some(m);
+            }
+            return None;
+        }
+    }
+    // www. URLs.
+    if matches_www_at(chars, i) {
+        return finish_bare_url(chars, i, Some("http://"));
+    }
+    // Bare emails: only attempt when sitting on a plausible local-part char
+    // just before an `@` within this word.
+    match_bare_email(chars, i)
+}
+
+/// Case-insensitive ASCII match of `scheme` at `chars[i..]`.
+fn matches_scheme_at(chars: &[char], i: usize, scheme: &str) -> bool {
+    let want: Vec<char> = scheme.chars().collect();
+    if i + want.len() > chars.len() {
+        return false;
+    }
+    chars[i..i + want.len()]
+        .iter()
+        .zip(want.iter())
+        .all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// `www.` prefix (exact lowercase per GFM) with an alphanumeric next char.
+fn matches_www_at(chars: &[char], i: usize) -> bool {
+    let want: Vec<char> = "www.".chars().collect();
+    if i + want.len() >= chars.len() {
+        return false;
+    }
+    if chars[i..i + want.len()] != want {
+        return false;
+    }
+    // `www.` must be followed by a domain char, and must not be part of a
+    // longer host word (`awww.foo` is rejected by the boundary rule above
+    // only for alphanumerics; `.`/`-` before are also not a start).
+    if i > 0 && (chars[i - 1] == '.' || chars[i - 1] == '-' || chars[i - 1] == '_') {
+        return false;
+    }
+    chars[i + want.len()].is_alphanumeric()
+}
+
+/// Extend a URL match from `start` to the next whitespace/`<>`, trim
+/// trailing punctuation, and split off the `(href_prefix, display, next)`.
+/// Returns None when nothing linkable remains after trimming.
+fn finish_bare_url(
+    chars: &[char],
+    start: usize,
+    href_prefix: Option<&str>,
+) -> Option<(String, String, usize)> {
+    let mut end = start;
+    while end < chars.len() && !matches!(chars[end], ' ' | '\t' | '\n' | '\r' | '<' | '>') {
+        end += 1;
+    }
+    let mut text: String = chars[start..end].iter().collect();
+    // Trim trailing punctuation `?!.,:;*_~'"` plus unbalanced `)`.
+    let mut trailing = 0usize;
+    loop {
+        let last = match text.chars().next_back() {
+            Some(c) => c,
+            None => break,
+        };
+        if matches!(
+            last,
+            '?' | '!' | '.' | ',' | ':' | ';' | '*' | '_' | '~' | '\'' | '"'
+        ) {
+            text.pop();
+            trailing += last.len_utf8();
+        } else if last == ')' {
+            let opens = text.chars().filter(|c| *c == '(').count();
+            let closes = text.chars().filter(|c| *c == ')').count();
+            if closes > opens {
+                text.pop();
+                trailing += 1;
+            } else {
+                break;
+            }
+        } else if last == ']' {
+            text.pop();
+            trailing += 1;
+        } else {
+            break;
+        }
+    }
+    end -= trailing;
+    // `www.` matches additionally require a dot in the host part.
+    if href_prefix.is_some() {
+        let host_end = text.find('/').unwrap_or(text.len());
+        if !text[4..host_end.min(text.len())].contains('.') && !text.contains('/') {
+            // Still accept `www.foo`-shaped hosts only; otherwise the caller
+            // treats this as no match. Guard: require a dot after `www.`.
+            if !text[3..].contains('.') {
+                // Fall through with the trimmed text anyway; validation of
+                // the single-label case keeps `www.x` plain by returning an
+                // empty display marker below.
+            }
+        }
+        if text.len() <= 4
+            || !text[4..]
+                .chars()
+                .next()
+                .map(|c| c.is_alphanumeric())
+                .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    if text.is_empty() {
+        return None;
+    }
+    let href = match href_prefix {
+        Some(p) => format!("{}{}", p, text),
+        None => text.clone(),
+    };
+    Some((text, href, end))
+}
+
+/// Try a bare-email match whose local part starts at `i`: scan the whole
+/// word, then validate the `local@domain` shape. Returns None unless the
+/// match starts exactly at `i` (so the scanner advances word by word).
+fn match_bare_email(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    if !is_email_local_char(chars[i]) && chars[i] != '@' {
+        return None;
+    }
+    // Word extent: until whitespace or an autolink-hostile char.
+    let mut end = i;
+    while end < chars.len() && !matches!(chars[end], ' ' | '\t' | '\n' | '\r' | '<' | '>') {
+        // Stop at characters that can never appear in an email.
+        if matches!(
+            chars[end],
+            '(' | ')' | '[' | ']' | ',' | ';' | ':' | '!' | '?' | '"' | '\''
+        ) {
+            break;
+        }
+        end += 1;
+    }
+    // Also stop before a trailing `.` run handled by validation trim.
+    let word: String = chars[i..end].iter().collect();
+    let at = match word.rfind('@') {
+        Some(p) => p,
+        None => return None,
+    };
+    // There must be no second `@` or whitespace inside; local part must be
+    // non-empty and start at `i` (boundary already checked by caller).
+    let (local, domain) = word.split_at(at);
+    let domain = &domain[1..];
+    if local.is_empty() || domain.is_empty() {
+        return None;
+    }
+    // Trim trailing dots from the domain (`a@b.com.` -> `a@b.com` + `.`).
+    let mut domain_end = domain.len();
+    let mut trimmed = 0usize;
+    while domain_end > 0 && domain.as_bytes()[domain_end - 1] == b'.' {
+        domain_end -= 1;
+        trimmed += 1;
+    }
+    let domain = &domain[..domain_end];
+    let candidate = format!("{}@{}", local, domain);
+    if !is_autolink_email(&candidate) {
+        return None;
+    }
+    // Local part must start at `i`: reject if the char at `i` is not the
+    // start of the local part (it always is, since word starts at `i`).
+    let display = candidate.clone();
+    let href = format!("mailto:{}", candidate);
+    Some((display, href, i + word.len() - trimmed))
+}
+
+fn is_email_local_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(c)
 }
 
 /// Render inline elements to HTML

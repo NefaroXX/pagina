@@ -208,6 +208,7 @@ struct MdConverter {
     tokens: Vec<HtmlToken>,
     pos: usize,
     in_pre: bool,
+    gfm: bool,
 }
 
 /// Per-column alignment of an HTML table, derived from `align`/`style`
@@ -275,11 +276,22 @@ fn delimiter_marker(a: Alignment) -> &'static str {
 }
 
 impl MdConverter {
+    #[allow(dead_code)]
     fn new(tokens: Vec<HtmlToken>) -> Self {
         MdConverter {
             tokens,
             pos: 0,
             in_pre: false,
+            gfm: false,
+        }
+    }
+
+    fn with_gfm(tokens: Vec<HtmlToken>, gfm: bool) -> Self {
+        MdConverter {
+            tokens,
+            pos: 0,
+            in_pre: false,
+            gfm,
         }
     }
 
@@ -366,6 +378,28 @@ impl MdConverter {
                         let content = self.convert_until_end(&name);
                         format!("*{}*", content)
                     }
+                    "del" | "s" | "strike" => {
+                        let content = self.convert_until_end(&name);
+                        if self.gfm {
+                            format!("~~{}~~", content)
+                        } else {
+                            content
+                        }
+                    }
+                    "input" => {
+                        // GFM task checkbox: `<input type="checkbox">`
+                        // becomes a sentinel consumed by the `<li>` arm.
+                        // Outside lists (or with GFM off) it vanishes.
+                        if self.gfm && is_checkbox(attrs.as_slice()) {
+                            if has_checked(attrs.as_slice()) {
+                                "\0CHECKED\0".to_string()
+                            } else {
+                                "\0UNCHECKED\0".to_string()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    }
                     "code" => {
                         if self.in_pre {
                             self.convert_until_end("code")
@@ -390,6 +424,8 @@ impl MdConverter {
                         let content = self.convert_until_end("a");
                         if href.is_empty() {
                             content
+                        } else if self.gfm && is_bare_anchor(&content, &href) {
+                            content
                         } else {
                             format!("[{}]({})", content, href)
                         }
@@ -409,6 +445,15 @@ impl MdConverter {
                     }
                     "li" => {
                         let content = self.convert_until_end("li");
+                        let trimmed = content.trim_start();
+                        if self.gfm {
+                            if let Some(rest) = trimmed.strip_prefix("\0CHECKED\0") {
+                                return format!("- [x] {}\n", rest.trim_start());
+                            }
+                            if let Some(rest) = trimmed.strip_prefix("\0UNCHECKED\0") {
+                                return format!("- [ ] {}\n", rest.trim_start());
+                            }
+                        }
                         format!("- {}\n", content.trim())
                     }
                     "blockquote" => {
@@ -486,6 +531,19 @@ impl MdConverter {
                 Some(HtmlToken::StartTag { name, .. }) if name == "li" => {
                     self.advance();
                     let item_content = self.convert_until_end("li");
+                    let trimmed = item_content.trim_start();
+                    if self.gfm {
+                        if let Some(rest) = trimmed.strip_prefix("\0CHECKED\0") {
+                            content.push_str(&format!("{}. [x] {}\n", start, rest.trim_start()));
+                            start += 1;
+                            continue;
+                        }
+                        if let Some(rest) = trimmed.strip_prefix("\0UNCHECKED\0") {
+                            content.push_str(&format!("{}. [ ] {}\n", start, rest.trim_start()));
+                            start += 1;
+                            continue;
+                        }
+                    }
                     content.push_str(&format!("{}. {}\n", start, item_content.trim()));
                     start += 1;
                 }
@@ -629,7 +687,64 @@ impl MdConverter {
     }
 }
 
+/// True when an `<input>` tag's attributes describe a checkbox.
+fn is_checkbox(attrs: &[(String, String)]) -> bool {
+    attrs
+        .iter()
+        .find(|(k, _)| k == "type")
+        .map(|(_, v)| v.to_ascii_lowercase() == "checkbox")
+        .unwrap_or(false)
+}
+
+/// True when a checkbox `<input>` carries a `checked` attribute (any value,
+/// including bare `checked` which parses to an empty string).
+fn has_checked(attrs: &[(String, String)]) -> bool {
+    attrs.iter().any(|(k, _)| k == "checked")
+}
+
+/// True when an anchor's visible text is already its bare form, so the GFM
+/// reverse direction emits plain text instead of `[text](href)`:
+/// `href == text`, `mailto:x` with text `x`, or `http://www.x` with text
+/// `www.x` (the forward direction's `www.` href expansion).
+fn is_bare_anchor(content: &str, href: &str) -> bool {
+    if content == href {
+        return true;
+    }
+    if let Some(addr) = href.strip_prefix("mailto:") {
+        if addr == content {
+            return true;
+        }
+    }
+    if content.starts_with("www.") && href == format!("http://{}", content) {
+        return true;
+    }
+    false
+}
+
+/// Conversion options for HTML → Markdown.
+///
+/// `gfm: false` (the default) keeps CommonMark-compatible output: `<del>` /
+/// `<s>` unwrap to plain text, checkbox inputs vanish, and every link keeps
+/// its `[text](href)` form. `gfm: true` renders `<del>`/`<s>`/`<strike>` as
+/// `~~`, checkbox inputs as `[ ]`/`[x]` prefixes, and already-bare anchors
+/// as plain URLs/emails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// Enable GFM extensions in the reverse direction.
+    pub gfm: bool,
+}
+
+impl Options {
+    /// Options with GFM extensions enabled.
+    pub fn gfm() -> Self {
+        Options { gfm: true }
+    }
+}
+
 /// Convert an HTML string to Markdown.
+///
+/// CommonMark-compatible reverse direction (see [`Options`] for the GFM
+/// boundary).
 ///
 /// Supports headings, paragraphs, bold/italic, code spans and blocks, links,
 /// ordered and unordered lists, blockquotes, horizontal rules, GFM pipe
@@ -642,9 +757,14 @@ impl MdConverter {
 /// assert_eq!(md, "# Hello\n");
 /// ```
 pub fn convert(input: &str) -> Result<String> {
+    convert_with(input, Options::default())
+}
+
+/// Convert HTML to Markdown with explicit [`Options`].
+pub fn convert_with(input: &str, options: Options) -> Result<String> {
     let mut tokenizer = HtmlTokenizer::new(input.to_string());
     let tokens = tokenizer.tokenize();
-    let mut converter = MdConverter::new(tokens);
+    let mut converter = MdConverter::with_gfm(tokens, options.gfm);
     let markdown = converter.convert();
 
     // Clean up excessive blank lines
@@ -662,6 +782,18 @@ pub fn convert(input: &str) -> Result<String> {
     }
 
     Ok(cleaned.join("\n").trim().to_string() + "\n")
+}
+
+/// Convert HTML to Markdown with GFM extensions enabled (see [`Options`]).
+///
+/// # Examples
+///
+/// ```
+/// let md = pagina::html_to_markdown::convert_gfm("<del>hi</del>").unwrap();
+/// assert_eq!(md, "~~hi~~\n");
+/// ```
+pub fn convert_gfm(input: &str) -> Result<String> {
+    convert_with(input, Options::gfm())
 }
 
 #[cfg(test)]
