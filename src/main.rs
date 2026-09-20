@@ -1,11 +1,15 @@
-use pagina::cli::{parse_args, print_help, print_version, Subcommand};
+use pagina::cli::{
+    parse_args, print_help_with, print_version, render_error, sniff_color, Subcommand,
+};
 use pagina::error::{Error, Result};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("Error: {}", e);
+        let argv: Vec<String> = std::env::args().collect();
+        let color = sniff_color(&argv);
+        eprintln!("{}", render_error(&e, color, io::stderr().is_terminal()));
         std::process::exit(1);
     }
 }
@@ -15,7 +19,7 @@ fn run() -> Result<()> {
 
     match args.subcommand {
         Subcommand::Help => {
-            print_help();
+            print_help_with(args.color);
             Ok(())
         }
         Subcommand::Version => {

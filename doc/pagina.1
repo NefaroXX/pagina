@@ -1,0 +1,119 @@
+.TH PAGINA 1 "2026-09-20" "pagina 0.2.0" "User Commands"
+.SH NAME
+pagina \- Markdown/HTML bidirectional converter
+.SH SYNOPSIS
+.B pagina
+.RB [ \-\-color =\fIauto\fR|\fIalways\fR|\fInever\fR ]
+.B to-html
+.RB [ \-\-gfm ]
+.I input.md output.html
+.br
+.B pagina
+.RB [ \-\-color =\fIauto\fR|\fIalways\fR|\fInever\fR ]
+.B to-md
+.RB [ \-\-gfm ]
+.I input.html output.md
+.br
+.B pagina
+.BR \-\-help | \-h | help
+.br
+.B pagina
+.BR \-\-version | \-v | version
+.SH DESCRIPTION
+.B pagina
+converts Markdown to HTML
+.RB ( to\-html )
+and HTML back to Markdown
+.RB ( to\-md ).
+Use
+.B \-
+as the input to read from stdin, or as the output to write to stdout.
+Colors are applied to help text and error messages only; converted output
+is never colorized.
+.SH OPTIONS
+.TP
+.B \-\-gfm
+Enable GFM extensions (task lists, strikethrough, bare autolinks,
+footnotes, deflists, math).
+Pipe tables render with or without
+.B \-\-gfm
+(spec-neutral exception).
+May also be enabled with
+.B gfm
+in
+.IR pagina.toml ;
+the flag overrides the file.
+.TP
+.BR \-\-color =\fIWHEN\fR
+Colorize help and error messages:
+.BR auto
+(default, TTY only),
+.BR always ,
+or
+.BR never .
+May appear before or after the subcommand, in
+.BI \-\-color= WHEN
+or
+.BI \-\-color " " WHEN
+form. Overrides the
+.B color
+key in
+.IR pagina.toml .
+.TP
+.BR \-h ", " \-\-help
+Print help information.
+.TP
+.BR \-v ", " \-\-version
+Print version information.
+.SH FILES
+.TP
+.I ./pagina.toml
+Per-directory config; takes precedence when present.
+.TP
+.I ~/.config/pagina/config.toml
+User-level config, used when
+.I ./pagina.toml
+is absent.
+.PP
+Keys:
+.B gfm
+(bool),
+.B color
+(auto|always|never). CLI flags override the file; unknown keys are ignored.
+.SH EXAMPLES
+.PP
+Convert a file:
+.RS
+.nf
+pagina to-html README.md README.html
+pagina to-md page.html page.md
+.fi
+.RE
+.PP
+GFM extensions and stdin/stdout:
+.RS
+.nf
+pagina to-html --gfm notes.md notes.html
+cat file.md | pagina to-html - output.html
+pagina to-html file.md -
+.fi
+.RE
+.PP
+Force or suppress colors:
+.RS
+.nf
+pagina --color=always to-html notes.md notes.html
+pagina --color=never to-md page.html page.md
+.fi
+.RE
+.SH EXIT STATUS
+.B 0
+on success,
+.B 1
+on conversion, I/O, or argument errors.
+.SH SEE ALSO
+.BR pagina --help ,
+project README (usage and API reference).
+.PP
+Note: output preserves raw HTML and javascript:/data: URLs per CommonMark \-
+sanitize before browser/email rendering.
