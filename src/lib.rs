@@ -1,3 +1,4 @@
+pub mod ast;
 pub mod cli;
 pub mod error;
 pub mod frontmatter;
@@ -7,6 +8,7 @@ pub mod inline_parser;
 pub mod markdown_to_html;
 #[cfg(feature = "sanitize")]
 pub mod sanitize;
+pub mod visitor;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -31,6 +33,7 @@ impl Options {
 }
 
 /// Convenience re-exports for the public API.
+pub use ast::{parse, parse_gfm, render_html, render_markdown};
 pub use frontmatter::{
     markdown_to_html_with_frontmatter, markdown_to_html_with_frontmatter_gfm,
     markdown_to_html_with_frontmatter_with, parse_with_frontmatter, prepend_frontmatter,

@@ -143,12 +143,26 @@ enum Tok {
         children: Vec<Tok>,
         url: String,
         title: Option<String>,
+        style: LinkKind,
     },
     Image {
         children: Vec<Tok>,
         url: String,
         title: Option<String>,
+        style: LinkKind,
     },
+}
+
+/// How a link/image was written in source. Recorded during tokenizing so
+/// the public AST (`crate::ast`) can retain reference styles; the legacy
+/// [`InlineElement`] mapping ignores it, keeping legacy output identical.
+#[derive(Debug, Clone, PartialEq)]
+enum LinkKind {
+    Inline,
+    Reference(String),
+    Collapsed,
+    Shortcut,
+    Angle,
 }
 
 fn is_ws(c: char) -> bool {
@@ -241,6 +255,7 @@ fn scan_angle(chars: &[char], i: usize) -> Option<(Tok, usize)> {
                 children: vec![Tok::Text(url.clone())],
                 url,
                 title: None,
+                style: LinkKind::Angle,
             };
             return Some((tok, j + 1));
         }
@@ -250,6 +265,7 @@ fn scan_angle(chars: &[char], i: usize) -> Option<(Tok, usize)> {
                 children: vec![Tok::Text(disp)],
                 url: format!("mailto:{}", inner),
                 title: None,
+                style: LinkKind::Angle,
             };
             return Some((tok, j + 1));
         }
@@ -676,6 +692,17 @@ fn tokenize(input: &str, refs: &RefDefs) -> Vec<Tok> {
 }
 
 fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
+    let mut toks = tokenize_links(input, refs, gfm);
+    process_emphasis(&mut toks);
+    toks
+}
+
+/// Tokenize through link formation, leaving emphasis delimiters unresolved.
+///
+/// Shared by the legacy path ([`tokenize_opts`], which then runs
+/// [`process_emphasis`]) and the AST path (`parse_inline_ast` below, which
+/// resolves emphasis itself to retain delimiter characters).
+fn tokenize_links(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
     let chars: Vec<char> = input.chars().collect();
     let mut toks: Vec<Tok> = Vec::new();
     let mut brackets: Vec<Bracket> = Vec::new();
@@ -855,14 +882,14 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                 // match on raw text (escapes intact, ex 194/545/549/550).
                 let raw_label: String = chars[brackets[bi].content_start..i].iter().collect();
                 let after = i + 1;
-                let mut formed: Option<(String, Option<String>, usize, bool)> = None;
+                let mut formed: Option<(String, Option<String>, usize, LinkKind)> = None;
                 // Inline link tail
                 if after < chars.len() && chars[after] == '(' {
                     // No space allowed between ] and ( (after already immediate)
                     if let Some((dest, title, next)) = parse_link_tail(&chars, after) {
                         // Empty dest with no title ok. Also links may not form if
                         // inner is... (images ok). Note: link text with code? fine.
-                        formed = Some((dest, title, next, false));
+                        formed = Some((dest, title, next, LinkKind::Inline));
                     }
                     if formed.is_none() {
                         // Not a valid inline tail: fall back to a shortcut
@@ -870,7 +897,7 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                         // literal (ex 568).
                         let key = normalize_label(&raw_label);
                         if let Some((d, t)) = refs.get(&key) {
-                            formed = Some((d.clone(), t.clone(), after, true));
+                            formed = Some((d.clone(), t.clone(), after, LinkKind::Shortcut));
                         }
                     }
                 } else if after < chars.len() && chars[after] == '[' {
@@ -879,12 +906,19 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                             // collapsed: label = raw link text
                             let key = normalize_label(&raw_label);
                             if let Some((d, t)) = refs.get(&key) {
-                                formed = Some((d.clone(), t.clone(), next, true));
+                                formed = Some((d.clone(), t.clone(), next, LinkKind::Collapsed));
                             }
                         } else {
                             let key = normalize_label(&label);
                             if let Some((d, t)) = refs.get(&key) {
-                                formed = Some((d.clone(), t.clone(), next, true));
+                                // Keep the raw label as written (case/escapes
+                                // intact) so Markdown rendering round-trips.
+                                formed = Some((
+                                    d.clone(),
+                                    t.clone(),
+                                    next,
+                                    LinkKind::Reference(label.clone()),
+                                ));
                             }
                         }
                     }
@@ -892,10 +926,10 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                     // shortcut reference (raw label, escapes intact)
                     let key = normalize_label(&raw_label);
                     if let Some((d, t)) = refs.get(&key) {
-                        formed = Some((d.clone(), t.clone(), after, true));
+                        formed = Some((d.clone(), t.clone(), after, LinkKind::Shortcut));
                     }
                 }
-                if let Some((dest, title, next, _is_ref)) = formed {
+                if let Some((dest, title, next, kind)) = formed {
                     // Link parts get entity decoding (backslashes were
                     // handled during tail parsing); percent-encoding happens
                     // at render time via clean_url.
@@ -908,12 +942,14 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
                             children,
                             url: dest,
                             title,
+                            style: kind,
                         });
                     } else {
                         toks.push(Tok::Link {
                             children,
                             url: dest,
                             title,
+                            style: kind,
                         });
                         // A formed link deactivates earlier `[` openers so
                         // outer links cannot contain it (ex 518) — except
@@ -997,7 +1033,6 @@ fn tokenize_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
         i += 1;
     }
     flush_text(&mut toks, &mut text_buf);
-    process_emphasis(&mut toks);
     toks
 }
 
@@ -1116,6 +1151,7 @@ fn process_emphasis(toks: &mut Vec<Tok>) {
                 children: inner,
                 url: String::new(),
                 title: None,
+                style: LinkKind::Inline,
             };
             // We use Link-with-empty-url as temporary strong/em marker? No —
             // instead directly splice Em/Strong via Text markers. Simplest:
@@ -1345,6 +1381,7 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                 children,
                 url,
                 title,
+                ..
             } => {
                 let inner = toks_to_elements(children);
                 out.push(InlineElement::Link {
@@ -1358,6 +1395,7 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                 children,
                 url,
                 title,
+                ..
             } => {
                 let inner = toks_to_elements(children);
                 // alt text: render inner as plain text (code -> content, em -> inner)
@@ -1701,6 +1739,525 @@ pub fn render_inline_html(elements: &[InlineElement]) -> String {
 /// Render inline elements to Markdown
 pub fn render_inline_md(elements: &[InlineElement]) -> String {
     elements.iter().map(|e| e.to_markdown()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Public-AST inline pipeline (styled nodes for `crate::ast`)
+// ---------------------------------------------------------------------------
+//
+// The legacy pipeline above (`tokenize_opts` + `process_emphasis` +
+// `toks_to_elements`) is behavior-frozen: it feeds `convert()` and must stay
+// byte-identical, so it is not touched here. This section reuses its
+// link-forming tokenizer (`tokenize_links`, which now also records
+// `LinkKind`) and resolves emphasis with delimiter-tagged sentinels, so
+// `crate::ast::Inline` can retain `*` vs `_`, `**` vs `__`, link reference
+// styles, and angle vs bare autolinks. Anything this pipeline does wrong
+// affects only the new AST entry points, never legacy output.
+
+use crate::ast::{Autolink, Image as AstImage, Inline as AstInline, Link as AstLink, LinkStyle};
+
+/// Parse inline Markdown into public-AST nodes (reference definitions and
+/// GFM gating supplied by the caller, mirroring [`parse_inline_opts`]).
+pub(crate) fn parse_inline_ast(input: &str, refs: &RefDefs, gfm: bool) -> Vec<AstInline> {
+    // Trailing spaces/tabs at the very end are stripped (no hard break).
+    let input = input.trim_end_matches([' ', '\t']);
+    let mut toks = tokenize_links(input, refs, gfm);
+    resolve_emphasis_ast(&mut toks);
+    let mut elems = toks_to_ast(&toks);
+    if gfm {
+        elems = linkify_ast(elems);
+    }
+    elems
+}
+
+/// Map a recorded [`LinkKind`] to the public [`LinkStyle`].
+/// Angle autolinks never reach here (they become [`AstInline::Autolink`]).
+fn ast_link_style(kind: &LinkKind) -> LinkStyle {
+    match kind {
+        LinkKind::Inline => LinkStyle::Inline,
+        LinkKind::Reference(label) => LinkStyle::Reference(label.clone()),
+        LinkKind::Collapsed => LinkStyle::Collapsed,
+        LinkKind::Shortcut => LinkStyle::Shortcut,
+        LinkKind::Angle => LinkStyle::Inline,
+    }
+}
+
+/// Delimiter-tagged emphasis sentinels: the legacy `process_emphasis`
+/// markers (`\0EM\0`, …) discard which character formed the run, so this
+/// resolver tags the character (`*` vs `_`) while running the same
+/// delimiter-stack algorithm.
+fn em_open(ch: char) -> &'static str {
+    if ch == '*' {
+        "\0EM*\0"
+    } else {
+        "\0EM_\0"
+    }
+}
+
+fn em_close(ch: char) -> String {
+    format!("{}\x01", em_open(ch))
+}
+
+fn strong_open(ch: char) -> &'static str {
+    if ch == '*' {
+        "\0STRONG*\0"
+    } else {
+        "\0STRONG_\0"
+    }
+}
+
+fn strong_close(ch: char) -> String {
+    format!("{}\x01", strong_open(ch))
+}
+
+const DEL_OPEN: &str = "\0DEL\0";
+
+fn del_close() -> String {
+    format!("{}\x01", DEL_OPEN)
+}
+
+/// Tagged-marker depth, mirroring [`marker_depth`] for the tagged set.
+fn marker_depth_ast(toks: &[Tok], idx: usize) -> i32 {
+    let mut d = 0i32;
+    for t in &toks[..idx.min(toks.len())] {
+        if let Tok::Code(m) = t {
+            if m == "\0EM*\0"
+                || m == "\0EM_\0"
+                || m == "\0STRONG*\0"
+                || m == "\0STRONG_\0"
+                || m == DEL_OPEN
+            {
+                d += 1;
+            } else if m == &em_close('*')
+                || m == &em_close('_')
+                || m == &strong_close('*')
+                || m == &strong_close('_')
+                || m == &del_close()
+            {
+                d -= 1;
+            }
+        }
+    }
+    d
+}
+
+/// Delimiter-stack emphasis resolution with delimiter retention.
+///
+/// Same algorithm as [`process_emphasis`] (backward opener scan, odd-match
+/// rule, same-depth boundary rule, restart after each match); only the
+/// emitted sentinels carry the delimiter character.
+fn resolve_emphasis_ast(toks: &mut Vec<Tok>) {
+    for tok in toks.iter_mut() {
+        match tok {
+            Tok::Link { children, .. } | Tok::Image { children, .. } => {
+                resolve_emphasis_ast(children);
+            }
+            _ => {}
+        }
+    }
+    let mut delims: Vec<usize> = Vec::new();
+    for (idx, t) in toks.iter().enumerate() {
+        if matches!(t, Tok::Delim { .. }) {
+            delims.push(idx);
+        }
+    }
+
+    let mut ci = 0;
+    while ci < delims.len() {
+        let c_idx = delims[ci];
+        let (ch, c_len, c_open, c_close) = match &toks[c_idx] {
+            Tok::Delim {
+                ch,
+                len,
+                can_open,
+                can_close,
+            } => (*ch, *len, *can_open, *can_close),
+            _ => {
+                ci += 1;
+                continue;
+            }
+        };
+        if !c_close {
+            ci += 1;
+            continue;
+        }
+        let mut oi_opt: Option<usize> = None;
+        let mut oi = ci;
+        while oi > 0 {
+            oi -= 1;
+            let o_idx = delims[oi];
+            let (o_ch, o_len, o_open, o_close) = match &toks[o_idx] {
+                Tok::Delim {
+                    ch,
+                    len,
+                    can_open,
+                    can_close,
+                } => (*ch, *len, *can_open, *can_close),
+                _ => continue,
+            };
+            if o_ch != ch || !o_open {
+                continue;
+            }
+            if ch == '~' && (o_len < 2 || c_len < 2) {
+                continue;
+            }
+            if (c_open || o_close)
+                && ((o_len + c_len) % 3 == 0)
+                && (o_len % 3 != 0 || c_len % 3 != 0)
+            {
+                continue;
+            }
+            if marker_depth_ast(toks, o_idx) != marker_depth_ast(toks, c_idx) {
+                continue;
+            }
+            oi_opt = Some(oi);
+            break;
+        }
+        if let Some(oi_found) = oi_opt {
+            let o_idx = delims[oi_found];
+            let o_len = match &toks[o_idx] {
+                Tok::Delim { len, .. } => *len,
+                _ => 0,
+            };
+            let use_len = if ch == '~' || (o_len >= 2 && c_len >= 2) {
+                2
+            } else {
+                1
+            };
+            let mut replacement: Vec<Tok> = Vec::new();
+            if o_len > use_len {
+                let (och, o_open, o_close) = match &toks[o_idx] {
+                    Tok::Delim {
+                        ch,
+                        can_open,
+                        can_close,
+                        ..
+                    } => (*ch, *can_open, *can_close),
+                    _ => (ch, true, false),
+                };
+                replacement.push(Tok::Delim {
+                    ch: och,
+                    len: o_len - use_len,
+                    can_open: o_open,
+                    can_close: o_close,
+                });
+            }
+            let (open, close) = if ch == '~' {
+                (DEL_OPEN.to_string(), del_close())
+            } else if use_len == 2 {
+                (strong_open(ch).to_string(), strong_close(ch))
+            } else {
+                (em_open(ch).to_string(), em_close(ch))
+            };
+            replacement.push(Tok::Code(open));
+            let inner_now: Vec<Tok> = toks[o_idx + 1..c_idx].to_vec();
+            replacement.extend(inner_now);
+            replacement.push(Tok::Code(close));
+            if c_len > use_len {
+                let (cch, co_open, co_close) = match &toks[c_idx] {
+                    Tok::Delim {
+                        ch,
+                        can_open,
+                        can_close,
+                        ..
+                    } => (*ch, *can_open, *can_close),
+                    _ => (ch, false, true),
+                };
+                replacement.push(Tok::Delim {
+                    ch: cch,
+                    len: c_len - use_len,
+                    can_open: co_open,
+                    can_close: co_close,
+                });
+            }
+            toks.splice(o_idx..=c_idx, replacement);
+            delims.clear();
+            for (idx, t) in toks.iter().enumerate() {
+                if matches!(t, Tok::Delim { .. }) {
+                    delims.push(idx);
+                }
+            }
+            ci = 0;
+            continue;
+        } else {
+            ci += 1;
+        }
+    }
+}
+
+/// Match a tagged emphasis open sentinel, returning (kind, delimiter).
+/// Kind 0 = emphasis, 1 = strong, 2 = strikethrough.
+fn tagged_open(s: &str) -> Option<(u8, char)> {
+    match s {
+        "\0EM*\0" => Some((0, '*')),
+        "\0EM_\0" => Some((0, '_')),
+        "\0STRONG*\0" => Some((1, '*')),
+        "\0STRONG_\0" => Some((1, '_')),
+        "\0DEL\0" => Some((2, '~')),
+        _ => None,
+    }
+}
+
+fn tagged_close(s: &str) -> Option<(u8, char)> {
+    match s {
+        s if s == em_close('*') => Some((0, '*')),
+        s if s == em_close('_') => Some((0, '_')),
+        s if s == strong_close('*') => Some((1, '*')),
+        s if s == strong_close('_') => Some((1, '_')),
+        s if s == del_close() => Some((2, '~')),
+        _ => None,
+    }
+}
+
+/// Literal fallback text for an unmatched tagged sentinel (defensive only:
+/// sentinels are created in matched pairs, mirroring `toks_to_elements`).
+fn tagged_literal(kind: u8, delim: char) -> String {
+    match kind {
+        1 => std::iter::repeat_n(delim, 2).collect(),
+        _ => delim.to_string(),
+    }
+}
+
+/// Build public-AST inlines from emphasis-resolved tokens, mirroring
+/// [`toks_to_elements`] (same nesting, same alt-text rule) plus style and
+/// delimiter retention.
+fn toks_to_ast(toks: &[Tok]) -> Vec<AstInline> {
+    let mut out: Vec<AstInline> = Vec::new();
+    let mut i = 0usize;
+    while i < toks.len() {
+        match &toks[i] {
+            Tok::Text(s) => {
+                if let Some(AstInline::Text(prev)) = out.last_mut() {
+                    prev.push_str(s);
+                } else {
+                    out.push(AstInline::Text(s.clone()));
+                }
+                i += 1;
+            }
+            Tok::Delim { ch, len, .. } => {
+                let s: String = std::iter::repeat_n(*ch, *len).collect();
+                if let Some(AstInline::Text(prev)) = out.last_mut() {
+                    prev.push_str(&s);
+                } else {
+                    out.push(AstInline::Text(s));
+                }
+                i += 1;
+            }
+            Tok::OpenBracket { image, .. } => {
+                let s = if *image { "![" } else { "[" };
+                if let Some(AstInline::Text(prev)) = out.last_mut() {
+                    prev.push_str(s);
+                } else {
+                    out.push(AstInline::Text(s.to_string()));
+                }
+                i += 1;
+            }
+            Tok::Code(s) => {
+                if let Some((kind, delim)) = tagged_open(s) {
+                    let mut j = i + 1;
+                    let mut depth = 1usize;
+                    while j < toks.len() {
+                        if let Tok::Code(m) = &toks[j] {
+                            if tagged_open(m) == Some((kind, delim)) {
+                                depth += 1;
+                            } else if tagged_close(m) == Some((kind, delim)) {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        j += 1;
+                    }
+                    if j < toks.len() {
+                        let inner = toks_to_ast(&toks[i + 1..j]);
+                        out.push(match kind {
+                            0 => AstInline::Emphasis {
+                                delimiter: delim,
+                                content: inner,
+                            },
+                            1 => AstInline::Strong {
+                                delimiter: delim,
+                                content: inner,
+                            },
+                            _ => AstInline::Strikethrough(inner),
+                        });
+                        i = j + 1;
+                    } else {
+                        let lit = tagged_literal(kind, delim);
+                        if let Some(AstInline::Text(prev)) = out.last_mut() {
+                            prev.push_str(&lit);
+                        } else {
+                            out.push(AstInline::Text(lit));
+                        }
+                        i += 1;
+                    }
+                } else if tagged_close(s).is_some() {
+                    // Unmatched close sentinel (defensive): literal text.
+                    if let Some(AstInline::Text(prev)) = out.last_mut() {
+                        prev.push_str(s.trim_matches('\0').trim_end_matches('\x01'));
+                    } else {
+                        out.push(AstInline::Text(
+                            s.trim_matches('\0').trim_end_matches('\x01').to_string(),
+                        ));
+                    }
+                    i += 1;
+                } else {
+                    out.push(AstInline::Code(s.clone()));
+                    i += 1;
+                }
+            }
+            Tok::RawHtml(s) => {
+                out.push(AstInline::RawHtml(s.clone()));
+                i += 1;
+            }
+            Tok::HardBreak => {
+                out.push(AstInline::HardBreak);
+                i += 1;
+            }
+            Tok::SoftBreak => {
+                out.push(AstInline::SoftBreak);
+                i += 1;
+            }
+            Tok::Link {
+                children,
+                url,
+                title,
+                style,
+            } => {
+                let inner = toks_to_ast(children);
+                if *style == LinkKind::Angle {
+                    out.push(AstInline::Autolink(Autolink {
+                        url: url.clone(),
+                        text: crate::ast::plain_text(&inner),
+                        bare: false,
+                    }));
+                } else {
+                    out.push(AstInline::Link(Box::new(AstLink {
+                        text: inner,
+                        url: url.clone(),
+                        title: title.clone(),
+                        style: ast_link_style(style),
+                    })));
+                }
+                i += 1;
+            }
+            Tok::Image {
+                children,
+                url,
+                title,
+                style,
+            } => {
+                let inner = toks_to_ast(children);
+                let alt = ast_image_alt(&inner);
+                out.push(AstInline::Image(Box::new(AstImage {
+                    alt,
+                    url: url.clone(),
+                    title: title.clone(),
+                    style: ast_link_style(style),
+                })));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Image alt text, mirroring `elements_to_plain` (including the nested-link
+/// nuance) so AST-derived HTML matches legacy output byte-for-byte.
+fn ast_image_alt(elems: &[AstInline]) -> String {
+    let mut s = String::new();
+    for e in elems {
+        match e {
+            AstInline::Text(t) => s.push_str(t),
+            AstInline::Emphasis { content, .. }
+            | AstInline::Strong { content, .. }
+            | AstInline::Strikethrough(content) => s.push_str(&ast_image_alt(content)),
+            AstInline::Code(c) => s.push_str(c),
+            AstInline::Link(link) => {
+                if ast_contains_link(&link.text) {
+                    s.push('[');
+                    s.push_str(&ast_image_alt(&link.text));
+                    s.push_str("](");
+                    s.push_str(&link.url);
+                    s.push(')');
+                } else {
+                    s.push_str(&ast_image_alt(&link.text));
+                }
+            }
+            AstInline::Image(img) => s.push_str(&img.alt),
+            AstInline::Autolink(a) => s.push_str(&a.text),
+            AstInline::RawHtml(h) => s.push_str(h),
+            AstInline::HardBreak | AstInline::SoftBreak => s.push('\n'),
+        }
+    }
+    s
+}
+
+/// True when AST inlines contain a nested link or image.
+fn ast_contains_link(elems: &[AstInline]) -> bool {
+    elems.iter().any(|e| match e {
+        AstInline::Link { .. } | AstInline::Image { .. } | AstInline::Autolink(_) => true,
+        AstInline::Emphasis { content, .. }
+        | AstInline::Strong { content, .. }
+        | AstInline::Strikethrough(content) => ast_contains_link(content),
+        _ => false,
+    })
+}
+
+/// GFM bare-autolink detection over AST inlines, mirroring
+/// `linkify_elements`: existing links, images, autolinks, code spans and raw
+/// HTML are left alone; emphasis children are recursed.
+fn linkify_ast(elems: Vec<AstInline>) -> Vec<AstInline> {
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems {
+        match e {
+            AstInline::Text(s) => out.extend(linkify_text_ast(&s)),
+            AstInline::Emphasis { delimiter, content } => out.push(AstInline::Emphasis {
+                delimiter,
+                content: linkify_ast(content),
+            }),
+            AstInline::Strong { delimiter, content } => out.push(AstInline::Strong {
+                delimiter,
+                content: linkify_ast(content),
+            }),
+            AstInline::Strikethrough(c) => out.push(AstInline::Strikethrough(linkify_ast(c))),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Split one text run at bare URLs and bare emails, mirroring
+/// `linkify_text`. Matches become bare [`Autolink`] nodes.
+fn linkify_text_ast(s: &str) -> Vec<AstInline> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out: Vec<AstInline> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some((display, href, next)) = match_bare_autolink(&chars, i) {
+            if !buf.is_empty() {
+                out.push(AstInline::Text(std::mem::take(&mut buf)));
+            }
+            out.push(AstInline::Autolink(Autolink {
+                url: href,
+                text: display,
+                bare: true,
+            }));
+            i = next;
+            continue;
+        }
+        buf.push(chars[i]);
+        i += 1;
+    }
+    if !buf.is_empty() {
+        out.push(AstInline::Text(buf));
+    }
+    if out.is_empty() {
+        out.push(AstInline::Text(String::new()));
+    }
+    out
 }
 
 #[cfg(test)]

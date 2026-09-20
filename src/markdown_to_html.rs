@@ -16,30 +16,47 @@ use crate::inline_parser::{
 
 /// Column alignment of a GFM table cell (from the delimiter row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Alignment {
+pub(crate) enum Alignment {
     None,
     Left,
     Center,
     Right,
 }
 
+/// How a heading was written: ATX (`#`, with any closing hash run noted) or
+/// setext (`=` / `-` underline). Recorded so the public AST can retain
+/// marker kinds; legacy rendering ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadingKind {
+    Atx { closing: bool },
+    Setext(char),
+}
+
 #[derive(Debug, Clone)]
 // CommonMark uses these exact block-type terms ("HTML block", "block quote");
 // the variant names deliberately echo the enum name for spec traceability.
 #[allow(clippy::enum_variant_names)]
-enum Block {
+pub(crate) enum Block {
     Paragraph(Vec<String>),
-    Heading(u8, String),
-    ThematicBreak,
+    Heading {
+        level: u8,
+        content: String,
+        kind: HeadingKind,
+    },
+    ThematicBreak(char),
     IndentedCode(Vec<String>),
     FencedCode {
         info: String,
         lines: Vec<String>,
+        fence_char: char,
+        fence_len: usize,
     },
     HtmlBlock(Vec<String>),
     BlockQuote(Vec<Block>),
     List {
         ordered: bool,
+        bullet: char,
+        delimiter: char,
         start: u32,
         tight: bool,
         items: Vec<Vec<Block>>,
@@ -144,10 +161,13 @@ fn after_small_indent(line: &PLine) -> Option<PLine> {
 // Leaf-block detectors
 // ---------------------------------------------------------------------------
 
-fn is_thematic_break(line: &PLine) -> bool {
+/// Thematic break: 3+ `-`/`_`/`*` (same char, spaces/tabs allowed).
+/// Returns the marker character. Callers needing only a boolean use
+/// `.is_some()`.
+fn is_thematic_break(line: &PLine) -> Option<char> {
     let t = match after_small_indent(line) {
         Some(t) => t.s,
-        None => return false,
+        None => return None,
     };
     let mut ch0: Option<char> = None;
     let mut count = 0usize;
@@ -158,24 +178,29 @@ fn is_thematic_break(line: &PLine) -> bool {
         match ch0 {
             None => {
                 if c != '-' && c != '_' && c != '*' {
-                    return false;
+                    return None;
                 }
                 ch0 = Some(c);
                 count = 1;
             }
             Some(m) => {
                 if c != m {
-                    return false;
+                    return None;
                 }
                 count += 1;
             }
         }
     }
-    count >= 3
+    if count >= 3 {
+        ch0
+    } else {
+        None
+    }
 }
 
-/// ATX heading: 1-6 `#`, then space/tab/EOL. Returns (level, content).
-fn parse_atx(line: &PLine) -> Option<(u8, String)> {
+/// ATX heading: 1-6 `#`, then space/tab/EOL. Returns (level, content,
+/// whether a closing hash run was stripped).
+fn parse_atx(line: &PLine) -> Option<(u8, String, bool)> {
     let t = after_small_indent(line)?.s;
     let mut level = 0u8;
     let mut it = t.char_indices();
@@ -192,13 +217,14 @@ fn parse_atx(line: &PLine) -> Option<(u8, String)> {
     let rest = &t[level as usize..];
     let mut rc = rest.chars();
     match rc.next() {
-        None => return Some((level, String::new())),
+        None => return Some((level, String::new(), false)),
         Some(c) if c == ' ' || c == '\t' => {}
         _ => return None,
     }
     // Strip one optional leading space already consumed; strip the rest later.
     let mut content = rest.trim().to_string();
     // Closing hash sequence: spaces + #'s + spaces only at end.
+    let mut closing = false;
     if content.ends_with('#') {
         let stripped_end = content.trim_end_matches('#');
         let hashes = &content[stripped_end.len()..];
@@ -207,9 +233,10 @@ fn parse_atx(line: &PLine) -> Option<(u8, String)> {
             && (before.is_empty() || before.ends_with(' ') || before.ends_with('\t'))
         {
             content = before.trim_end().to_string();
+            closing = true;
         }
     }
-    Some((level, content))
+    Some((level, content, closing))
 }
 
 /// Setext underline: all `=` -> 1, all `-` -> 2.
@@ -1217,7 +1244,7 @@ fn line_is_para_text(line: &PLine) -> bool {
     }
     if parse_fence_open(line).is_some()
         || parse_atx(line).is_some()
-        || is_thematic_break(line)
+        || is_thematic_break(line).is_some()
         || html_block_start(line, true).is_some()
         || parse_list_marker(line).is_some()
         || parse_blockquote_marker(line).is_some()
@@ -1239,7 +1266,7 @@ fn is_interrupting_block_start(line: &PLine, in_para: bool) -> bool {
     if parse_blockquote_marker(line).is_some() {
         return true;
     }
-    if is_thematic_break(line) {
+    if is_thematic_break(line).is_some() {
         return true;
     }
     if html_block_start(line, in_para).is_some() {
@@ -1316,6 +1343,8 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
             blocks.push(Block::FencedCode {
                 info,
                 lines: content,
+                fence_char: fc,
+                fence_len: flen,
             });
             spans.push((bs, i));
             continue;
@@ -1351,10 +1380,14 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
         }
 
         // ATX heading.
-        if let Some((level, content)) = parse_atx(&lines[i]) {
+        if let Some((level, content, closing)) = parse_atx(&lines[i]) {
             let bs = i;
             flush_para(&mut blocks, &mut spans, &mut para, i);
-            blocks.push(Block::Heading(level, content));
+            blocks.push(Block::Heading {
+                level,
+                content,
+                kind: HeadingKind::Atx { closing },
+            });
             spans.push((bs, i + 1));
             i += 1;
             continue;
@@ -1371,7 +1404,11 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
                     .collect::<Vec<_>>()
                     .join("\n");
                 para.clear();
-                blocks.push(Block::Heading(level, text));
+                blocks.push(Block::Heading {
+                    level,
+                    content: text,
+                    kind: HeadingKind::Setext(if level == 1 { '=' } else { '-' }),
+                });
                 spans.push((ps, i + 1));
                 i += 1;
                 continue;
@@ -1379,9 +1416,9 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
         }
 
         // Thematic break.
-        if is_thematic_break(&lines[i]) {
+        if let Some(tb_marker) = is_thematic_break(&lines[i]) {
             flush_para(&mut blocks, &mut spans, &mut para, i);
-            blocks.push(Block::ThematicBreak);
+            blocks.push(Block::ThematicBreak(tb_marker));
             spans.push((i, i + 1));
             i += 1;
             continue;
@@ -1500,7 +1537,7 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
                                 Some(a) => a,
                             };
                             // Thematic breaks win over list markers.
-                            if is_thematic_break(&lines[i])
+                            if is_thematic_break(&lines[i]).is_some()
                                 || parse_atx(&lines[i]).is_some()
                                 || parse_fence_open(&lines[i]).is_some()
                                 || html_block_start(&lines[i], false).is_some()
@@ -1614,7 +1651,7 @@ fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usiz
             // `* * *` ends the list instead of starting an item)?
             let same_item = match parse_list_marker(&lines[j]) {
                 Some(m2) => {
-                    !is_thematic_break(&lines[j])
+                    is_thematic_break(&lines[j]).is_none()
                         && m2.ordered == ordered
                         && (if ordered {
                             m2.delim == delim
@@ -1653,7 +1690,7 @@ fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usiz
             break;
         }
         // Same-type new item? (A thematic break line ends the list instead.)
-        if !is_thematic_break(line) {
+        if is_thematic_break(line).is_none() {
             if let Some(m2) = parse_list_marker(line) {
                 let same = m2.ordered == ordered
                     && (if ordered {
@@ -1739,6 +1776,8 @@ fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usiz
     (
         Block::List {
             ordered,
+            bullet: if ordered { '-' } else { bullet },
+            delimiter: if ordered { delim } else { '\0' },
             start: list_start,
             tight: !loose,
             items: items_blocks,
@@ -1777,7 +1816,7 @@ fn render_inline_text_opts(s: &str, refs: &RefDefs, gfm: bool) -> String {
 
 /// Strip a GFM task-list prefix (`[ ]`, `[x]`/`[X]` + whitespace/EOL) from
 /// the start of a list item's first paragraph. Returns (checked, rest).
-fn strip_task_prefix(s: &str) -> Option<(bool, String)> {
+pub(crate) fn strip_task_prefix(s: &str) -> Option<(bool, String)> {
     let b = s.as_bytes();
     if b.len() < 3 || b[0] != b'[' || b[2] != b']' {
         return None;
@@ -1797,7 +1836,7 @@ fn strip_task_prefix(s: &str) -> Option<(bool, String)> {
     }
 }
 
-fn task_checkbox(checked: bool) -> &'static str {
+pub(crate) fn task_checkbox(checked: bool) -> &'static str {
     if checked {
         "<input type=\"checkbox\" checked=\"\" disabled=\"\" /> "
     } else {
@@ -1807,7 +1846,7 @@ fn task_checkbox(checked: bool) -> &'static str {
 
 /// First word of a fenced-code info string, with backslash escapes and
 /// entities resolved (e.g. `foo\+bar` -> `foo+bar`).
-fn clean_info_word(info: &str) -> String {
+pub(crate) fn clean_info_word(info: &str) -> String {
     let word = info.split_whitespace().next().unwrap_or("");
     let mut out = String::with_capacity(word.len());
     let mut it = word.chars().peekable();
@@ -1840,12 +1879,16 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             out.push_str(&render_inline_text_opts(&text, refs, gfm));
             out.push_str("</p>\n");
         }
-        Block::Heading(level, content) => {
+        Block::Heading {
+            level,
+            content,
+            kind: _,
+        } => {
             out.push_str(&format!("<h{}>", level));
             out.push_str(&render_inline_text_opts(content, refs, gfm));
             out.push_str(&format!("</h{}>\n", level));
         }
-        Block::ThematicBreak => {
+        Block::ThematicBreak(_) => {
             out.push_str("<hr />\n");
         }
         Block::IndentedCode(lines) => {
@@ -1861,7 +1904,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             }
             out.push_str("</code></pre>\n");
         }
-        Block::FencedCode { info, lines } => {
+        Block::FencedCode { info, lines, .. } => {
             out.push_str("<pre><code");
             let lang = clean_info_word(info);
             if !lang.is_empty() {
@@ -1895,6 +1938,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             start,
             tight,
             items,
+            ..
         } => {
             render_list(ordered, start, tight, items, refs, gfm, out);
         }
@@ -2048,7 +2092,7 @@ fn render_list(
 }
 
 /// Append a GFM ` align="…"` attribute for a column alignment.
-fn append_alignment(out: &mut String, a: Alignment) {
+pub(crate) fn append_alignment(out: &mut String, a: Alignment) {
     let attr = match a {
         Alignment::None => return,
         Alignment::Left => "left",
@@ -2109,10 +2153,26 @@ pub fn convert(input: &str) -> Result<String> {
 /// conversion (it never renders into the HTML), with or without the
 /// `frontmatter` cargo feature enabled.
 pub fn convert_with(input: &str, options: Options) -> Result<String> {
-    // Strip YAML frontmatter first: it is metadata, not content. Runs for
-    // both CommonMark and GFM paths (and with the feature off), so a fenced
-    // document converts exactly like its body alone.
-    let input = crate::frontmatter::strip_frontmatter_body(input);
+    // Frontmatter is metadata, not content: strip it before conversion (with
+    // or without the `frontmatter` cargo feature) so a fenced document
+    // converts exactly like its body alone.
+    let body = crate::frontmatter::strip_frontmatter_body(input);
+    let (blocks, refs) = parse_document_blocks(body);
+    let mut out = String::new();
+    render_blocks_opts(&blocks, &refs, options.gfm, &mut out);
+    Ok(out)
+}
+
+/// Parse Markdown (frontmatter already stripped) into the internal block
+/// tree plus collected link reference definitions.
+///
+/// Shared by the legacy [`convert_with`] path and the public AST
+/// (`crate::ast::parse`). Two passes: the first collects all link reference
+/// definitions (definitions apply regardless of position, even after use);
+/// the second builds the tree with the complete map. Refdef extraction is
+/// order-independent (first definition wins), so structure is identical in
+/// both passes.
+pub(crate) fn parse_document_blocks(input: &str) -> (Vec<Block>, RefDefs) {
     // Split into lines (strip \r; keep tabs verbatim for tab-stop logic).
     let raw: Vec<String> = input
         .replace("\r\n", "\n")
@@ -2126,16 +2186,10 @@ pub fn convert_with(input: &str, options: Options) -> Result<String> {
         raw.pop();
     }
     let lines: Vec<PLine> = raw.into_iter().map(PLine::fresh).collect();
-    // Two passes: the first collects all link reference definitions
-    // (definitions apply regardless of position, even after use); the second
-    // renders with the complete map. Refdef extraction is order-independent
-    // (first definition wins), so structure is identical in both passes.
     let mut refs: RefDefs = RefDefs::new();
     let _ = parse_blocks(&lines, &mut refs);
     let blocks = parse_blocks(&lines, &mut refs);
-    let mut out = String::new();
-    render_blocks_opts(&blocks, &refs, options.gfm, &mut out);
-    Ok(out)
+    (blocks, refs)
 }
 
 /// Convert Markdown to HTML with GFM extensions enabled (task lists,
