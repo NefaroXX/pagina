@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod error;
+pub mod frontmatter;
 pub mod html_escape;
 pub mod html_to_markdown;
 pub mod inline_parser;
@@ -26,6 +27,11 @@ impl Options {
 }
 
 /// Convenience re-exports for the public API.
+pub use frontmatter::{
+    markdown_to_html_with_frontmatter, markdown_to_html_with_frontmatter_gfm,
+    markdown_to_html_with_frontmatter_with, parse_with_frontmatter, prepend_frontmatter,
+    Frontmatter,
+};
 pub use html_escape::{escape_html, unescape_html};
 pub use html_to_markdown::convert as html_to_markdown;
 pub use html_to_markdown::convert_gfm as html_to_markdown_gfm;

@@ -2010,7 +2010,15 @@ pub fn convert(input: &str) -> Result<String> {
 }
 
 /// Convert Markdown to HTML with explicit [`Options`].
+///
+/// A leading `---`/`+++` frontmatter block is silently stripped before
+/// conversion (it never renders into the HTML), with or without the
+/// `frontmatter` cargo feature enabled.
 pub fn convert_with(input: &str, options: Options) -> Result<String> {
+    // Strip YAML frontmatter first: it is metadata, not content. Runs for
+    // both CommonMark and GFM paths (and with the feature off), so a fenced
+    // document converts exactly like its body alone.
+    let input = crate::frontmatter::strip_frontmatter_body(input);
     // Split into lines (strip \r; keep tabs verbatim for tab-stop logic).
     let raw: Vec<String> = input
         .replace("\r\n", "\n")
