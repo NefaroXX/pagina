@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-20
+
+### Added
+
+- Property-based round-trip tests (proptest, 8 properties over bounded
+  generator spaces) and criterion benchmarks (7 benches over a
+  `spec.txt`-derived corpus); dev-dependencies only, default build stays
+  dependency-free.
+- CLI DX: static shell completions (bash/zsh/fish/powershell), roff man page
+  (`doc/pagina.1`), `--color=auto/always/never` (converted output bytes
+  untouched), and layered `pagina.toml` config (`./pagina.toml` over
+  `~/.config/pagina/config.toml`, CLI flags win).
+- Browser playground (`playground/`, vanilla JS + published `pagina-wasm`,
+  sandboxed preview) with a GitHub Pages deploy workflow.
+- Integration guides (`docs/`): mdBook preprocessor, Zola pipeline, and
+  cargo-doc/README generation via xtask/`build.rs`.
+
 ## [0.2.0] - 2026-09-20
 
 ### Added
