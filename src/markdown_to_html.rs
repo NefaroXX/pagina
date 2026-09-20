@@ -2138,6 +2138,7 @@ fn render_blocks(blocks: &[Block], refs: &RefDefs, out: &mut String) {
         &FootnoteMap::default(),
         false,
         &mut FootnoteState::default(),
+        None,
         out,
     );
 }
@@ -2148,10 +2149,11 @@ fn render_blocks_opts(
     foot: &FootnoteMap,
     gfm: bool,
     fs: &mut FootnoteState,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
     out: &mut String,
 ) {
     for b in blocks {
-        render_block_opts(b, refs, foot, gfm, fs, out);
+        render_block_opts(b, refs, foot, gfm, fs, hl, out);
     }
 }
 
@@ -2244,6 +2246,7 @@ fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
         &FootnoteMap::default(),
         false,
         &mut FootnoteState::default(),
+        None,
         out,
     );
 }
@@ -2254,6 +2257,7 @@ fn render_block_opts(
     foot: &FootnoteMap,
     gfm: bool,
     fs: &mut FootnoteState,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
     out: &mut String,
 ) {
     match b {
@@ -2277,33 +2281,17 @@ fn render_block_opts(
         }
         Block::IndentedCode(lines) => {
             out.push_str("<pre><code>");
-            for (k, l) in lines.iter().enumerate() {
-                out.push_str(&escape_html(l));
-                if k + 1 < lines.len() {
-                    out.push('\n');
-                }
-            }
-            if !lines.is_empty() {
-                out.push('\n');
-            }
+            push_code_content("", lines, out, hl);
             out.push_str("</code></pre>\n");
         }
         Block::FencedCode { info, lines, .. } => {
             out.push_str("<pre><code");
-            let lang = clean_info_word(info);
+            let lang = crate::highlight::language_from_info(info);
             if !lang.is_empty() {
                 out.push_str(&format!(" class=\"language-{}\"", escape_href(&lang)));
             }
             out.push('>');
-            for (k, l) in lines.iter().enumerate() {
-                out.push_str(&escape_html(l));
-                if k + 1 < lines.len() {
-                    out.push('\n');
-                }
-            }
-            if !lines.is_empty() {
-                out.push('\n');
-            }
+            push_code_content(&lang, lines, out, hl);
             out.push_str("</code></pre>\n");
         }
         Block::HtmlBlock(lines) => {
@@ -2314,7 +2302,7 @@ fn render_block_opts(
         }
         Block::BlockQuote(children) => {
             out.push_str("<blockquote>\n");
-            render_blocks_opts(children, refs, foot, gfm, fs, out);
+            render_blocks_opts(children, refs, foot, gfm, fs, hl, out);
             out.push_str("</blockquote>\n");
         }
         Block::List {
@@ -2324,7 +2312,7 @@ fn render_block_opts(
             items,
             ..
         } => {
-            render_list(ordered, start, tight, items, refs, foot, gfm, fs, out);
+            render_list(ordered, start, tight, items, refs, foot, gfm, fs, hl, out);
         }
         Block::Table {
             header,
@@ -2361,7 +2349,30 @@ fn render_block_opts(
             out.push_str("</table>\n");
         }
         Block::DefinitionList { tight, items } => {
-            render_deflist(tight, items, refs, foot, gfm, fs, out);
+            render_deflist(tight, items, refs, foot, gfm, fs, hl, out);
+        }
+    }
+}
+
+/// Code content via the highlighter hook when registered, else escaped.
+fn push_code_content(
+    lang: &str,
+    lines: &[String],
+    out: &mut String,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
+    match hl {
+        Some(h) => h.write_highlighted(out, lang, &crate::highlight::join_code_text(lines)),
+        None => {
+            for (k, l) in lines.iter().enumerate() {
+                out.push_str(&escape_html(l));
+                if k + 1 < lines.len() {
+                    out.push('\n');
+                }
+            }
+            if !lines.is_empty() {
+                out.push('\n');
+            }
         }
     }
 }
@@ -2369,6 +2380,10 @@ fn render_block_opts(
 /// Render a definition list (`<dl>` with `<dt>` terms and `<dd>`
 /// descriptions). Tight single-paragraph descriptions unwrap `<p>`,
 /// mirroring tight list items; loose descriptions render as blocks.
+/// Ten parameters mirror the neighboring render functions (block plus shared
+/// render context plus the optional highlighter); a context struct would
+/// churn every call site for no behavioral gain.
+#[allow(clippy::too_many_arguments)]
 fn render_deflist(
     tight: &bool,
     items: &[DefListItem],
@@ -2376,6 +2391,7 @@ fn render_deflist(
     foot: &FootnoteMap,
     gfm: bool,
     fs: &mut FootnoteState,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
     out: &mut String,
 ) {
     out.push_str("<dl>\n");
@@ -2406,7 +2422,7 @@ fn render_deflist(
                 continue;
             }
             out.push_str("<dd>\n");
-            render_blocks_opts(desc, refs, foot, gfm, fs, out);
+            render_blocks_opts(desc, refs, foot, gfm, fs, hl, out);
             out.push_str("</dd>\n");
         }
     }
@@ -2431,6 +2447,7 @@ fn render_list(
     foot: &FootnoteMap,
     gfm: bool,
     fs: &mut FootnoteState,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
     out: &mut String,
 ) {
     if *ordered {
@@ -2486,7 +2503,7 @@ fn render_list(
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
-                        render_block_opts(b, refs, foot, gfm, fs, out);
+                        render_block_opts(b, refs, foot, gfm, fs, hl, out);
                     }
                 }
             }
@@ -2526,7 +2543,7 @@ fn render_list(
                         ));
                         out.push_str("</p>\n");
                     }
-                    _ => render_block_opts(b, refs, foot, gfm, fs, out),
+                    _ => render_block_opts(b, refs, foot, gfm, fs, hl, out),
                 }
             }
             out.push_str("</li>\n");
@@ -2550,6 +2567,7 @@ fn render_footnote_section(
     refs: &RefDefs,
     gfm: bool,
     fs: &mut FootnoteState,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
     out: &mut String,
 ) {
     if fs.order.is_empty() {
@@ -2593,7 +2611,7 @@ fn render_footnote_section(
         // The backlinks join the last paragraph when there is one (cmark-gfm
         // shape); otherwise they form their own paragraph.
         let mut rendered = String::new();
-        render_blocks_opts(&content, refs, foot, gfm, fs, &mut rendered);
+        render_blocks_opts(&content, refs, foot, gfm, fs, hl, &mut rendered);
         let ends_para =
             matches!(content.last(), Some(Block::Paragraph(_))) && rendered.ends_with("</p>\n");
         if ends_para {
@@ -2626,13 +2644,15 @@ pub(crate) fn append_alignment(out: &mut String, a: Alignment) {
 /// Conversion options for Markdown → HTML.
 ///
 /// `gfm: false` (the default) is pure CommonMark 0.31.2: `~~`, task-list
-/// brackets, bare `http(s)://`/`www.`/emails, `[^…]` footnote markers and
-/// `:` definition markers stay literal. `gfm: true` additionally enables
-/// task-list checkboxes, `~~` strikethrough (`<del>`), bare autolinks,
-/// footnotes (`[^label]` references plus `[^label]:` definitions rendered
-/// as a `<section class="footnotes" data-footnotes>` footer) and PHP
-/// Markdown Extra-style definition lists (`Term` + `: description` as
-/// `<dl>`).
+/// brackets, bare `http(s)://`/`www.`/emails, `[^…]` footnote markers,
+/// `:` definition markers and `$…$`/`$$…$$` dollar math stay literal.
+/// `gfm: true` additionally enables task-list checkboxes, `~~`
+/// strikethrough (`<del>`), bare autolinks, footnotes (`[^label]`
+/// references plus `[^label]:` definitions rendered as a
+/// `<section class="footnotes" data-footnotes>` footer), PHP Markdown
+/// Extra-style definition lists (`Term` + `: description` as `<dl>`) and
+/// dollar math (inline `$…$` as `<span class="math-inline">`, display
+/// `$$…$$` as `<div class="math-display">`, content verbatim).
 ///
 /// Tables are the one always-on GFM exception and render in both modes
 /// (the CommonMark spec has no pipe-table tests, so compliance is
@@ -2678,6 +2698,25 @@ pub fn convert(input: &str) -> Result<String> {
 /// conversion (it never renders into the HTML), with or without the
 /// `frontmatter` cargo feature enabled.
 pub fn convert_with(input: &str, options: Options) -> Result<String> {
+    convert_with_highlighter(input, options, None)
+}
+
+/// Convert Markdown to HTML with an optional syntax highlighter.
+///
+/// Adapter-hook pattern: with `None` the output is byte-identical to
+/// [`convert_with`] (escaped code content). With `Some(h)` fenced/indented
+/// code content comes from `h.write_highlighted` (language from
+/// [`crate::highlight::language_from_info`], so `"rust,ignore"` highlights
+/// as `"rust"`); the `<pre><code class="language-…">` wrapper is unchanged.
+///
+/// GFM also enables dollar math (`$…$` inline,
+/// `<span class="math-inline">`; `$$…$$` display,
+/// `<div class="math-display">`); `convert()` stays CommonMark-pure.
+pub fn convert_with_highlighter(
+    input: &str,
+    options: Options,
+    highlighter: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) -> Result<String> {
     // Frontmatter is metadata, not content: strip it before conversion (with
     // or without the `frontmatter` cargo feature) so a fenced document
     // converts exactly like its body alone.
@@ -2685,9 +2724,17 @@ pub fn convert_with(input: &str, options: Options) -> Result<String> {
     let (blocks, refs, foot) = parse_document_blocks_opts(body, options.gfm);
     let mut out = String::new();
     let mut fs = FootnoteState::default();
-    render_blocks_opts(&blocks, &refs, &foot, options.gfm, &mut fs, &mut out);
+    render_blocks_opts(
+        &blocks,
+        &refs,
+        &foot,
+        options.gfm,
+        &mut fs,
+        highlighter,
+        &mut out,
+    );
     if options.gfm {
-        render_footnote_section(&foot, &refs, options.gfm, &mut fs, &mut out);
+        render_footnote_section(&foot, &refs, options.gfm, &mut fs, highlighter, &mut out);
     }
     Ok(out)
 }

@@ -29,7 +29,7 @@ use crate::frontmatter::Frontmatter;
 use crate::html_escape::{clean_url, escape_href, escape_html};
 use crate::inline_parser::RefDefs;
 use crate::markdown_to_html::{
-    append_alignment, clean_info_word, parse_document_blocks_opts, strip_task_prefix, task_checkbox,
+    append_alignment, parse_document_blocks_opts, strip_task_prefix, task_checkbox,
 };
 
 // ---------------------------------------------------------------------------
@@ -289,6 +289,10 @@ pub enum Inline {
     /// GFM footnote reference (`[^label]`); `number` is the 1-based
     /// first-reference order shared with [`FootnoteDefinition`].
     FootnoteReference(FootnoteReference),
+    /// GFM-gated dollar math, inline `$…$` (verbatim content).
+    MathInline(String),
+    /// GFM-gated dollar math, display `$$…$$` (verbatim content).
+    MathDisplay(String),
     /// Inline raw HTML, passed through verbatim.
     RawHtml(String),
     /// Two-space / backslash line ending.
@@ -366,8 +370,9 @@ pub struct Autolink {
 ///
 /// `gfm: false` is pure CommonMark (task brackets stay literal, `~~`
 /// stays literal, bare URLs stay plain, `[^…]` and `:` markers stay
-/// literal); `gfm: true` additionally parses task-list items, `~~`
-/// strikethrough, bare autolinks, footnotes, and definition lists. Pipe
+/// literal, `$…$` stays literal); `gfm: true` additionally parses task-list
+/// items, `~~` strikethrough, bare autolinks, footnotes, definition lists,
+/// and dollar math. Pipe
 /// tables parse in both modes (spec-neutral always-on exception, as in
 /// [`crate::markdown_to_html::convert`]).
 ///
@@ -453,6 +458,7 @@ pub fn plain_text(inlines: &[Inline]) -> String {
                 s.push_str(&r.label);
                 s.push(']');
             }
+            Inline::MathInline(c) | Inline::MathDisplay(c) => s.push_str(c),
             Inline::RawHtml(h) => s.push_str(h),
             Inline::HardBreak | Inline::SoftBreak => s.push('\n'),
         }
@@ -649,6 +655,20 @@ fn convert_list_item(
 /// documents parsed with the corresponding options (verified in
 /// `tests/ast.rs`); frontmatter never renders.
 pub fn render_html(doc: &Document) -> String {
+    render_html_with_highlighter(doc, None)
+}
+
+/// Render a [`Document`] to HTML with an optional [`crate::highlight::SyntaxHighlighter`].
+///
+/// With `None` the output is byte-identical to [`render_html`] (escaped code
+/// content, `class="language-…"` from the fence language). With a highlighter
+/// the code *content* comes from
+/// [`crate::highlight::SyntaxHighlighter::write_highlighted`] while the
+/// surrounding `<pre><code …>` wrapper is unchanged.
+pub fn render_html_with_highlighter(
+    doc: &Document,
+    highlighter: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) -> String {
     let mut fr = FootnoteRender::collect(doc);
     let mut out = String::new();
     for block in &doc.blocks {
@@ -657,9 +677,9 @@ pub fn render_html(doc: &Document) -> String {
         if matches!(block, Block::FootnoteDefinition(_)) {
             continue;
         }
-        render_block_html(block, &mut out, &mut fr);
+        render_block_html(block, &mut out, &mut fr, highlighter);
     }
-    render_footnote_footer(doc, &mut fr, &mut out);
+    render_footnote_footer(doc, &mut fr, &mut out, highlighter);
     out
 }
 
@@ -759,7 +779,12 @@ fn count_footnote_refs_inlines(
 /// from top-level [`Block::FootnoteDefinition`] nodes, in document order
 /// (which [`parse`] already arranged as first-reference order). Definitions
 /// without references are dropped from HTML.
-fn render_footnote_footer(doc: &Document, fr: &mut FootnoteRender, out: &mut String) {
+fn render_footnote_footer(
+    doc: &Document,
+    fr: &mut FootnoteRender,
+    out: &mut String,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
     let defs: Vec<&FootnoteDefinition> = doc
         .blocks
         .iter()
@@ -795,7 +820,7 @@ fn render_footnote_footer(doc: &Document, fr: &mut FootnoteRender, out: &mut Str
         }
         let mut rendered = String::new();
         for child in &def.blocks {
-            render_block_html(child, &mut rendered, fr);
+            render_block_html(child, &mut rendered, fr, hl);
         }
         let ends_para =
             matches!(def.blocks.last(), Some(Block::Paragraph(_))) && rendered.ends_with("</p>\n");
@@ -853,6 +878,8 @@ fn render_inlines_html(inlines: &[Inline], fr: &mut FootnoteRender) -> String {
                     &r.label, r.number, occurrence,
                 ));
             }
+            Inline::MathInline(c) => out.push_str(&crate::math::render_inline_math(c)),
+            Inline::MathDisplay(c) => out.push_str(&crate::math::render_display_math(c)),
             Inline::RawHtml(s) => out.push_str(s),
             Inline::HardBreak => out.push_str("<br />\n"),
             Inline::SoftBreak => out.push('\n'),
@@ -908,7 +935,12 @@ fn render_image_html(img: &Image, out: &mut String) {
     }
 }
 
-fn render_block_html(block: &Block, out: &mut String, fr: &mut FootnoteRender) {
+fn render_block_html(
+    block: &Block,
+    out: &mut String,
+    fr: &mut FootnoteRender,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
     match block {
         Block::Paragraph(inlines) => {
             out.push_str("<p>");
@@ -923,7 +955,7 @@ fn render_block_html(block: &Block, out: &mut String, fr: &mut FootnoteRender) {
         Block::ThematicBreak(_) => {
             out.push_str("<hr />\n");
         }
-        Block::CodeBlock(code) => render_code_html(code, out),
+        Block::CodeBlock(code) => render_code_html(code, out, hl),
         Block::HtmlBlock(lines) => {
             for line in lines {
                 out.push_str(line);
@@ -933,21 +965,26 @@ fn render_block_html(block: &Block, out: &mut String, fr: &mut FootnoteRender) {
         Block::BlockQuote(children) => {
             out.push_str("<blockquote>\n");
             for child in children {
-                render_block_html(child, out, fr);
+                render_block_html(child, out, fr, hl);
             }
             out.push_str("</blockquote>\n");
         }
-        Block::List(list) => render_list_html(list, out, fr),
+        Block::List(list) => render_list_html(list, out, fr, hl),
         Block::Table(table) => render_table_html(table, out, fr),
         // Hoisted: the footer owns definitions (see `render_footnote_footer`).
         Block::FootnoteDefinition(_) => {}
-        Block::DefinitionList(list) => render_deflist_html(list, out, fr),
+        Block::DefinitionList(list) => render_deflist_html(list, out, fr, hl),
     }
 }
 
 /// Definition-list rendering, mirroring the legacy renderer: `<dl>` with
 /// `<dt>` terms; tight single-paragraph descriptions unwrap `<p>`.
-fn render_deflist_html(list: &DefinitionList, out: &mut String, fr: &mut FootnoteRender) {
+fn render_deflist_html(
+    list: &DefinitionList,
+    out: &mut String,
+    fr: &mut FootnoteRender,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
     out.push_str("<dl>\n");
     for item in &list.items {
         for term in &item.terms {
@@ -972,7 +1009,7 @@ fn render_deflist_html(list: &DefinitionList, out: &mut String, fr: &mut Footnot
             }
             out.push_str("<dd>\n");
             for child in &desc.blocks {
-                render_block_html(child, out, fr);
+                render_block_html(child, out, fr, hl);
             }
             out.push_str("</dd>\n");
         }
@@ -980,23 +1017,40 @@ fn render_deflist_html(list: &DefinitionList, out: &mut String, fr: &mut Footnot
     out.push_str("</dl>\n");
 }
 
-fn render_code_html(code: &CodeBlock, out: &mut String) {
+fn render_code_html(
+    code: &CodeBlock,
+    out: &mut String,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
     match code.kind {
         CodeBlockKind::Indented => {
             out.push_str("<pre><code>");
-            push_code_lines(&code.lines, out);
+            push_code_content("", &code.lines, out, hl);
             out.push_str("</code></pre>\n");
         }
         CodeBlockKind::Fenced { .. } => {
             out.push_str("<pre><code");
-            let lang = clean_info_word(&code.info);
+            let lang = crate::highlight::language_from_info(&code.info);
             if !lang.is_empty() {
                 out.push_str(&format!(" class=\"language-{}\"", escape_href(&lang)));
             }
             out.push('>');
-            push_code_lines(&code.lines, out);
+            push_code_content(&lang, &code.lines, out, hl);
             out.push_str("</code></pre>\n");
         }
+    }
+}
+
+/// Code content via the highlighter hook when registered, else escaped.
+fn push_code_content(
+    lang: &str,
+    lines: &[String],
+    out: &mut String,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
+    match hl {
+        Some(h) => h.write_highlighted(out, lang, &crate::highlight::join_code_text(lines)),
+        None => push_code_lines(lines, out),
     }
 }
 
@@ -1015,7 +1069,12 @@ fn push_code_lines(lines: &[String], out: &mut String) {
 /// List rendering, mirroring the legacy renderer line-for-line except that
 /// the task split happened at [`parse`] time (`item.task` + pre-stripped
 /// first paragraph) instead of at render time.
-fn render_list_html(list: &List, out: &mut String, fr: &mut FootnoteRender) {
+fn render_list_html(
+    list: &List,
+    out: &mut String,
+    fr: &mut FootnoteRender,
+    hl: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) {
     if list.ordered {
         if list.start != 1 {
             out.push_str(&format!("<ol start=\"{}\">\n", list.start));
@@ -1047,7 +1106,7 @@ fn render_list_html(list: &List, out: &mut String, fr: &mut FootnoteRender) {
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
-                        render_block_html(block, out, fr);
+                        render_block_html(block, out, fr, hl);
                     }
                 }
             }
@@ -1078,7 +1137,7 @@ fn render_list_html(list: &List, out: &mut String, fr: &mut FootnoteRender) {
                         out.push_str(&render_inlines_html(inlines, fr));
                         out.push_str("</p>\n");
                     }
-                    _ => render_block_html(block, out, fr),
+                    _ => render_block_html(block, out, fr, hl),
                 }
             }
             out.push_str("</li>\n");
@@ -1446,6 +1505,16 @@ fn render_inlines_markdown(inlines: &[Inline]) -> String {
             }
             Inline::FootnoteReference(r) => {
                 out.push_str(&format!("[^{}]", r.label));
+            }
+            Inline::MathInline(c) => {
+                out.push('$');
+                out.push_str(c);
+                out.push('$');
+            }
+            Inline::MathDisplay(c) => {
+                out.push_str("$$");
+                out.push_str(c);
+                out.push_str("$$");
             }
             Inline::RawHtml(s) => out.push_str(s),
             Inline::HardBreak => out.push_str("  \n"),

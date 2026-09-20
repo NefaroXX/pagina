@@ -42,6 +42,10 @@ pub enum InlineElement {
         number: usize,
         occurrence: usize,
     },
+    /// GFM-gated dollar math, inline `$…$` (verbatim content).
+    MathInline(String),
+    /// GFM-gated dollar math, display `$$…$$` (verbatim content).
+    MathDisplay(String),
     RawHtml(String),
     HardBreak,
     SoftBreak,
@@ -64,6 +68,8 @@ impl InlineElement {
                 format!("<del>{}</del>", inner)
             }
             InlineElement::Code(s) => format!("<code>{}</code>", escape_html(s)),
+            InlineElement::MathInline(c) => crate::math::render_inline_math(c),
+            InlineElement::MathDisplay(c) => crate::math::render_display_math(c),
             InlineElement::Link { text, url, title } => {
                 let inner: String = text.iter().map(|c| c.to_html()).collect();
                 match title {
@@ -122,6 +128,8 @@ impl InlineElement {
                 format!("~~{}~~", inner)
             }
             InlineElement::Code(s) => format!("`{}`", s),
+            InlineElement::MathInline(c) => format!("${}$", c),
+            InlineElement::MathDisplay(c) => format!("$${}$$", c),
             InlineElement::Link { text, url, title } => {
                 let inner: String = text.iter().map(|c| c.to_markdown()).collect();
                 match title {
@@ -1504,6 +1512,7 @@ fn elements_to_plain(elems: &[InlineElement]) -> String {
                 s.push_str(&elements_to_plain(c))
             }
             InlineElement::Code(c) => s.push_str(c),
+            InlineElement::MathInline(c) | InlineElement::MathDisplay(c) => s.push_str(c),
             InlineElement::Link { text, url, .. } => {
                 // Image descriptions preserve nested-link markup but
                 // flatten plain links (ex 520 vs 575).
@@ -1621,9 +1630,53 @@ fn parse_inline_opts(input: &str, refs: &RefDefs, gfm: bool) -> Vec<InlineElemen
     let toks = tokenize_opts(input, refs, gfm);
     let mut elems = toks_to_elements(&toks);
     if gfm {
+        // Math first so linkify never runs inside verbatim math content.
+        elems = split_math_elements(elems);
         elems = linkify_elements(elems);
     }
     elems
+}
+
+/// Split `Text` runs at `$…$` / `$$…$$` spans (GFM math). Code spans, links,
+/// images, autolinks and raw HTML are left alone; emphasis children are
+/// recursed so `*$x$*` still parses inside.
+fn split_math_elements(elems: Vec<InlineElement>) -> Vec<InlineElement> {
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems {
+        match e {
+            InlineElement::Text(s) => {
+                for seg in crate::math::split_math_text(&s) {
+                    match seg {
+                        crate::math::MathSegment::Text(t) => {
+                            if let Some(InlineElement::Text(prev)) = out.last_mut() {
+                                prev.push_str(&t);
+                            } else {
+                                out.push(InlineElement::Text(t));
+                            }
+                        }
+                        crate::math::MathSegment::Inline(c) => {
+                            out.push(InlineElement::MathInline(c))
+                        }
+                        crate::math::MathSegment::Display(c) => {
+                            out.push(InlineElement::MathDisplay(c))
+                        }
+                    }
+                }
+            }
+            InlineElement::Bold(c) => out.push(InlineElement::Bold(split_math_elements(c))),
+            InlineElement::Italic(c) => out.push(InlineElement::Italic(split_math_elements(c))),
+            InlineElement::Strikethrough(c) => {
+                out.push(InlineElement::Strikethrough(split_math_elements(c)))
+            }
+            InlineElement::Link { text, url, title } => out.push(InlineElement::Link {
+                text: split_math_elements(text),
+                url,
+                title,
+            }),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1911,9 +1964,53 @@ pub(crate) fn parse_inline_ast(
     resolve_emphasis_ast(&mut toks);
     let mut elems = toks_to_ast(&toks, footnotes, forder);
     if gfm {
+        // Math first so linkify never runs inside verbatim math content.
+        elems = split_math_ast(elems);
         elems = linkify_ast(elems);
     }
     elems
+}
+
+/// Split AST `Text` runs at `$…$` / `$$…$$` spans (GFM math), mirroring
+/// [`split_math_elements`]: code, links, images, autolinks and raw HTML are
+/// left alone; emphasis children are recursed.
+fn split_math_ast(elems: Vec<AstInline>) -> Vec<AstInline> {
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems {
+        match e {
+            AstInline::Text(s) => {
+                for seg in crate::math::split_math_text(&s) {
+                    match seg {
+                        crate::math::MathSegment::Text(t) => {
+                            if let Some(AstInline::Text(prev)) = out.last_mut() {
+                                prev.push_str(&t);
+                            } else {
+                                out.push(AstInline::Text(t));
+                            }
+                        }
+                        crate::math::MathSegment::Inline(c) => out.push(AstInline::MathInline(c)),
+                        crate::math::MathSegment::Display(c) => out.push(AstInline::MathDisplay(c)),
+                    }
+                }
+            }
+            AstInline::Emphasis { delimiter, content } => out.push(AstInline::Emphasis {
+                delimiter,
+                content: split_math_ast(content),
+            }),
+            AstInline::Strong { delimiter, content } => out.push(AstInline::Strong {
+                delimiter,
+                content: split_math_ast(content),
+            }),
+            AstInline::Strikethrough(c) => out.push(AstInline::Strikethrough(split_math_ast(c))),
+            AstInline::Link(link) => {
+                let mut link = *link;
+                link.text = split_math_ast(link.text);
+                out.push(AstInline::Link(Box::new(link)));
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Number a defined footnote label in first-reference order.
@@ -2370,6 +2467,7 @@ fn ast_image_alt(elems: &[AstInline]) -> String {
                 s.push_str(&r.label);
                 s.push(']');
             }
+            AstInline::MathInline(c) | AstInline::MathDisplay(c) => s.push_str(c),
             AstInline::RawHtml(h) => s.push_str(h),
             AstInline::HardBreak | AstInline::SoftBreak => s.push('\n'),
         }

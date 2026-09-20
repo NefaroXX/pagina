@@ -118,6 +118,8 @@ pub fn walk_inline<V: Visitor>(inline: &Inline, visitor: &mut V) {
         | Inline::Image(_)
         | Inline::Autolink(_)
         | Inline::FootnoteReference(_)
+        | Inline::MathInline(_)
+        | Inline::MathDisplay(_)
         | Inline::RawHtml(_)
         | Inline::HardBreak
         | Inline::SoftBreak => {}

@@ -451,10 +451,39 @@ impl MdConverter {
                             self.convert_until_end("sup")
                         }
                     }
+                    "span" => {
+                        // GFM dollar math passthrough back to `$…$`.
+                        // Non-math spans unwrap to their content.
+                        if has_math_class(&attrs, "math-inline") {
+                            let content = self.convert_until_end("span");
+                            if self.gfm {
+                                format!("${}$", content.trim())
+                            } else {
+                                content
+                            }
+                        } else if has_math_class(&attrs, "math-display") {
+                            let content = self.convert_until_end("span");
+                            if self.gfm {
+                                format!("$${}$$", content.trim())
+                            } else {
+                                content
+                            }
+                        } else {
+                            self.convert_until_end(&name)
+                        }
+                    }
                     "section" | "div" => {
+                        // GFM dollar math display back to `$$…$$`.
+                        if has_math_class(&attrs, "math-display") {
+                            let content = self.convert_until_end(&name);
+                            if self.gfm {
+                                format!("\n$${}$$\n", content.trim())
+                            } else {
+                                format!("\n{}\n", content.trim())
+                            }
                         // GFM footnotes footer back to `[^N]: …` definitions.
                         // Anything else unwraps to its content.
-                        if self.gfm && has_footnotes_class(&attrs) {
+                        } else if self.gfm && has_footnotes_class(&attrs) {
                             let content = self.convert_footnote_section(&name);
                             format!("\n{}\n", content.trim())
                         } else {
@@ -890,6 +919,16 @@ impl MdConverter {
     }
 }
 
+/// True when a tag's `class` attribute carries a math passthrough token
+/// (`class="… math-inline …"`, the forward converter's shape).
+fn has_math_class(attrs: &[(String, String)], token: &str) -> bool {
+    attrs
+        .iter()
+        .find(|(k, _)| k == "class")
+        .map(|(_, v)| v.split_whitespace().any(|c| c == token))
+        .unwrap_or(false)
+}
+
 /// True when a `<section>`/`<div>` tag's attributes mark a footnotes footer
 /// (`class="… footnotes …"`, the forward converter's shape).
 fn has_footnotes_class(attrs: &[(String, String)]) -> bool {
@@ -996,13 +1035,15 @@ fn is_bare_anchor(content: &str, href: &str) -> bool {
 ///
 /// `gfm: false` (the default) keeps CommonMark-compatible output: `<del>` /
 /// `<s>` unwrap to plain text, checkbox inputs vanish, every link keeps
-/// its `[text](href)` form, footnote sections flatten to plain content and
-/// `<dl>`/`<dt>`/`<dd>` unwrap to plain content. `gfm: true` renders
-/// `<del>`/`<s>`/`<strike>` as `~~`, checkbox inputs as `[ ]`/`[x]`
-/// prefixes, already-bare anchors as plain URLs/emails, footnote reference
-/// `<sup>` elements as `[^N]` with their `<section class="footnotes">`
-/// footer back as `[^N]: …` definitions, and `<dl>` elements as term /
-/// `: description` definition lists.
+/// its `[text](href)` form, footnote sections flatten to plain content,
+/// `<dl>`/`<dt>`/`<dd>` unwrap to plain content and math passthrough spans
+/// unwrap to plain content. `gfm: true` renders `<del>`/`<s>`/`<strike>`
+/// as `~~`, checkbox inputs as `[ ]`/`[x]` prefixes, already-bare anchors
+/// as plain URLs/emails, footnote reference `<sup>` elements as `[^N]` with
+/// their `<section class="footnotes">` footer back as `[^N]: …`
+/// definitions, `<dl>` elements as term / `: description` definition lists,
+/// and `<span class="math-inline">` / `<div class="math-display">` back as
+/// `$…$` / `$$…$$` dollar math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Options {
     /// Enable GFM extensions in the reverse direction.

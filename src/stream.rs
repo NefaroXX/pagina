@@ -35,9 +35,7 @@
 use crate::ast::{Alignment, Block, Document, Inline};
 use crate::html_escape::{clean_url, escape_href, escape_html};
 use crate::inline_parser::footnote_ref_html;
-use crate::markdown_to_html::{
-    append_alignment, clean_info_word, task_checkbox, Alignment as HtmlAlignment,
-};
+use crate::markdown_to_html::{append_alignment, task_checkbox, Alignment as HtmlAlignment};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -195,6 +193,10 @@ pub enum Event {
     Text(String),
     /// Code span content (backticks stripped).
     Code(String),
+    /// GFM-gated dollar math, inline `$…$` (verbatim content).
+    MathInline(String),
+    /// GFM-gated dollar math, display `$$…$$` (verbatim content).
+    MathDisplay(String),
     /// One verbatim HTML block line (inside `HtmlBlock`).
     Html(String),
     /// Inline raw HTML, passed through verbatim.
@@ -424,6 +426,8 @@ fn push_inline(inline: &Inline, events: &mut Vec<Event>) {
             events.push(Event::End(TagEnd::Strikethrough));
         }
         Inline::Code(s) => events.push(Event::Code(s.clone())),
+        Inline::MathInline(s) => events.push(Event::MathInline(s.clone())),
+        Inline::MathDisplay(s) => events.push(Event::MathDisplay(s.clone())),
         Inline::Link(link) => {
             events.push(Event::Start(Tag::Link {
                 url: link.url.clone(),
@@ -488,7 +492,7 @@ struct HoistedDef {
 }
 
 /// Renderer state threaded through the recursive event walk.
-struct RenderCtx {
+struct RenderCtx<'a> {
     lists: Vec<ListFrame>,
     tables: Vec<TableFrame>,
     dl_tight: Vec<bool>,
@@ -496,6 +500,7 @@ struct RenderCtx {
     seen: HashMap<String, usize>,
     totals: HashMap<String, usize>,
     defs: Vec<HoistedDef>,
+    hl: Option<&'a dyn crate::highlight::SyntaxHighlighter>,
 }
 
 /// Render an event slice to HTML.
@@ -507,6 +512,16 @@ struct RenderCtx {
 /// are collected during the walk and emitted as the
 /// `<section class="footnotes" data-footnotes>` footer.
 pub fn render_events_to_html(events: &[Event]) -> String {
+    render_events_to_html_with_highlighter(events, None)
+}
+
+/// Render an event slice to HTML with an optional highlighter (see
+/// [`crate::ast::render_html_with_highlighter`]). With `None` the output is
+/// byte-identical to [`render_events_to_html`].
+pub fn render_events_to_html_with_highlighter(
+    events: &[Event],
+    highlighter: Option<&dyn crate::highlight::SyntaxHighlighter>,
+) -> String {
     let mut totals: HashMap<String, usize> = HashMap::new();
     for event in events {
         if let Event::FootnoteReference { label, .. } = event {
@@ -521,6 +536,7 @@ pub fn render_events_to_html(events: &[Event]) -> String {
         seen: HashMap::new(),
         totals,
         defs: Vec::new(),
+        hl: highlighter,
     };
     let mut out = String::new();
     let mut pos = 0;
@@ -579,14 +595,22 @@ fn render_block_at(events: &[Event], pos: &mut usize, ctx: &mut RenderCtx, out: 
         Tag::CodeBlock { info } => {
             *pos += 1;
             out.push_str("<pre><code");
-            let lang = clean_info_word(&info);
+            let lang = crate::highlight::language_from_info(&info);
             if !lang.is_empty() {
                 out.push_str(&format!(" class=\"language-{}\"", escape_href(&lang)));
             }
             out.push('>');
             if let Some(Event::Text(text)) = events.get(*pos) {
-                out.push_str(&escape_html(text));
+                match ctx.hl {
+                    Some(h) => h.write_highlighted(out, &lang, text),
+                    None => out.push_str(&escape_html(text)),
+                }
                 *pos += 1;
+            } else if ctx.hl.is_some() {
+                // Empty code block: highlighter sees empty content (no-op).
+                if let Some(h) = ctx.hl {
+                    h.write_highlighted(out, &lang, "");
+                }
             }
             // Consume the closer.
             *pos += 1;
@@ -969,6 +993,14 @@ fn render_inline_leaf(events: &[Event], pos: &mut usize, ctx: &mut RenderCtx, ou
             out.push_str("<code>");
             out.push_str(&escape_html(&s));
             out.push_str("</code>");
+        }
+        Some(Event::MathInline(s)) => {
+            let s = s.clone();
+            out.push_str(&crate::math::render_inline_math(&s));
+        }
+        Some(Event::MathDisplay(s)) => {
+            let s = s.clone();
+            out.push_str(&crate::math::render_display_math(&s));
         }
         Some(Event::InlineHtml(s)) => {
             let s = s.clone();

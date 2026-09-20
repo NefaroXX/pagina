@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 yaml-rust = { version = "0.4", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+syntect = { version = "5.3", optional = true, default-features = false, features = ["default-fancy"] }
 
 [features]
 default = []
@@ -36,6 +37,14 @@ wasm = ["dep:wasm-bindgen"]
 # dependencies by design (denylist sanitizer, std only) to preserve the
 # WASM size story and offline builds.
 sanitize = []
+syntax-highlight = ["dep:syntect"]
+# Optional syntax highlighting (`src/highlight.rs`). Off by default so the
+# default build stays dependency-free; enabling it pulls in `syntect`
+# (pure-Rust `fancy-regex` backend via `default-fancy`, no Onig C
+# dependency, WASM-safe). The default syntax/theme dumps cost ~2-4MB of
+# binary size when the caller loads them (`SyntaxSet::load_defaults_*`);
+# the adapter itself never embeds dumps — it borrows a caller-supplied
+# `SyntaxSet` so embedders pay that cost only when they opt in.
 
 [profile.release]
 opt-level = 3
