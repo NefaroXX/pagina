@@ -10,12 +10,16 @@ categories = ["command-line-utilities", "text-processing"]
 readme = "README.md"
 exclude = [".github/", ".gitignore", "target/", ".deepwork/"]
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "pagina"
 path = "src/main.rs"
 
 [dependencies]
 yaml-rust = { version = "0.4", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
 default = []
@@ -23,7 +27,23 @@ default = []
 # the default build stays dependency-free; enabling it pulls in `yaml-rust`
 # (pure Rust, no serde).
 frontmatter = ["dep:yaml-rust"]
+# Optional WebAssembly bindings (`src/wasm.rs`). Off by default so the
+# default build stays dependency-free; enabling it pulls in `wasm-bindgen`.
+wasm = ["dep:wasm-bindgen"]
 
 [profile.release]
 opt-level = 3
 lto = true
+
+# Size-optimized profile for the WASM/npm build:
+# `cargo build --profile wasm --target wasm32-unknown-unknown --features wasm`
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--enable-mutable-globals"]

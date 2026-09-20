@@ -5,6 +5,8 @@ pub mod html_escape;
 pub mod html_to_markdown;
 pub mod inline_parser;
 pub mod markdown_to_html;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 /// Conversion options shared by both directions.
 ///

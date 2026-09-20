@@ -71,6 +71,32 @@ tool, not a fast unit test). Re-run it with:
 cargo test --test commonmark_compliance -- --ignored --nocapture
 ```
 
+## WebAssembly / npm
+
+The `wasm` cargo feature exposes the converters to JavaScript via
+`wasm-bindgen` (`src/wasm.rs`). The default build stays dependency-free;
+only `--features wasm` pulls in `wasm-bindgen`.
+
+Exported functions: `markdown_to_html`, `markdown_to_html_gfm`,
+`html_to_markdown`, `html_to_markdown_gfm` (each throws on error), plus
+frontmatter helpers `frontmatter_has`, `frontmatter_body`,
+`frontmatter_original`, `frontmatter_get`, and `prepend_frontmatter`.
+
+```bash
+# Check the bindings compile (host target, no wasm toolchain needed)
+cargo check --features wasm
+
+# Size-optimized WASM build (needs the wasm32 target + wasm-pack)
+rustup target add wasm32-unknown-unknown
+wasm-pack build --target bundler --features wasm
+# or: cargo build --profile wasm --target wasm32-unknown-unknown --features wasm
+```
+
+`Cargo.toml` ships a `[profile.wasm]` size profile (`opt-level = "z"`,
+LTO, single codegen unit, stripped) and
+`[package.metadata.wasm-pack.profile.release]` (`wasm-opt -Oz`) tuning
+for the npm artifact.
+
 ## License
 
 MIT
