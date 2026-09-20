@@ -2151,6 +2151,51 @@ pub fn convert_gfm(input: &str) -> Result<String> {
     convert_with(input, Options::gfm())
 }
 
+/// Convert Markdown to sanitized HTML (CommonMark 0.31.2 core + sanitizer).
+///
+/// Available only with the `sanitize` cargo feature. Runs [`convert`],
+/// then strips dangerous elements/attributes via
+/// [`crate::sanitize::sanitize_html`]. Safe markup (`a[href]`, `strong`,
+/// `em`, `code`, tables, lists, …) is preserved; `script`/`style`/
+/// `iframe`/`object`/`embed`/`form`/`base`/`link`/`meta` elements, `on*`
+/// and `style` attributes, and `javascript:`/`vbscript:`/`data:text/html`
+/// URLs in `href`/`src` are removed or neutralized.
+///
+/// The default [`convert`] path is byte-identical with or without the
+/// feature enabled — sanitization only happens through this function.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "sanitize")] {
+/// let html = pagina::markdown_to_html::convert_sanitized("# Hello").unwrap();
+/// assert_eq!(html, "<h1>Hello</h1>\n");
+/// # }
+/// ```
+#[cfg(feature = "sanitize")]
+pub fn convert_sanitized(input: &str) -> Result<String> {
+    convert_with_sanitized(input, Options::default())
+}
+
+/// Convert Markdown to sanitized HTML with explicit [`Options`].
+///
+/// Available only with the `sanitize` cargo feature. Combines
+/// [`convert_with`] with [`crate::sanitize::sanitize_html`].
+#[cfg(feature = "sanitize")]
+pub fn convert_with_sanitized(input: &str, options: Options) -> Result<String> {
+    let html = convert_with(input, options)?;
+    Ok(crate::sanitize::sanitize_html(&html))
+}
+
+/// Convert Markdown to sanitized HTML with GFM extensions enabled.
+///
+/// Available only with the `sanitize` cargo feature. Combines
+/// [`convert_gfm`] with [`crate::sanitize::sanitize_html`].
+#[cfg(feature = "sanitize")]
+pub fn convert_gfm_sanitized(input: &str) -> Result<String> {
+    convert_with_sanitized(input, Options::gfm())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

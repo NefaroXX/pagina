@@ -30,6 +30,12 @@ frontmatter = ["dep:yaml-rust"]
 # Optional WebAssembly bindings (`src/wasm.rs`). Off by default so the
 # default build stays dependency-free; enabling it pulls in `wasm-bindgen`.
 wasm = ["dep:wasm-bindgen"]
+# Optional HTML sanitization (`src/sanitize.rs`). Off by default so the
+# default build stays byte-identical (raw HTML passes through verbatim per
+# CommonMark); enabling it adds the `convert_sanitized` API. Zero
+# dependencies by design (denylist sanitizer, std only) to preserve the
+# WASM size story and offline builds.
+sanitize = []
 
 [profile.release]
 opt-level = 3

@@ -5,6 +5,8 @@ pub mod html_escape;
 pub mod html_to_markdown;
 pub mod inline_parser;
 pub mod markdown_to_html;
+#[cfg(feature = "sanitize")]
+pub mod sanitize;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -41,3 +43,11 @@ pub use html_to_markdown::convert_with as html_to_markdown_with;
 pub use markdown_to_html::convert as markdown_to_html;
 pub use markdown_to_html::convert_gfm as markdown_to_html_gfm;
 pub use markdown_to_html::convert_with as markdown_to_html_with;
+#[cfg(feature = "sanitize")]
+pub use markdown_to_html::{
+    convert_gfm_sanitized as markdown_to_html_gfm_sanitized,
+    convert_sanitized as markdown_to_html_sanitized,
+    convert_with_sanitized as markdown_to_html_with_sanitized,
+};
+#[cfg(feature = "sanitize")]
+pub use sanitize::sanitize_html;

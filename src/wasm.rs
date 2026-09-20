@@ -52,6 +52,33 @@ pub fn html_to_markdown_gfm(input: &str) -> Result<String, JsValue> {
     crate::html_to_markdown::convert_gfm(input).map_err(map_err)
 }
 
+/// Convert Markdown to sanitized HTML (CommonMark core + denylist
+/// sanitizer; see [`crate::sanitize::sanitize_html`]).
+///
+/// Only available when the `sanitize` cargo feature is also enabled
+/// (`--features wasm,sanitize`); otherwise this binding is absent.
+/// Native-only consumers should prefer
+/// [`crate::markdown_to_html::convert_sanitized`].
+///
+/// Throws a JS error if the conversion fails.
+#[cfg(feature = "sanitize")]
+#[wasm_bindgen]
+pub fn markdown_to_html_sanitized(input: &str) -> Result<String, JsValue> {
+    crate::markdown_to_html::convert_sanitized(input).map_err(map_err)
+}
+
+/// Convert Markdown to sanitized HTML with GFM extensions.
+///
+/// Only available with `--features wasm,sanitize` (see
+/// [`markdown_to_html_sanitized`]).
+///
+/// Throws a JS error if the conversion fails.
+#[cfg(feature = "sanitize")]
+#[wasm_bindgen]
+pub fn markdown_to_html_gfm_sanitized(input: &str) -> Result<String, JsValue> {
+    crate::markdown_to_html::convert_gfm_sanitized(input).map_err(map_err)
+}
+
 /// True when `input` starts with a valid `---` / `+++` frontmatter block.
 ///
 /// Same detection as [`crate::frontmatter::parse_with_frontmatter`].
