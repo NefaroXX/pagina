@@ -44,7 +44,8 @@ pub trait Visitor {
     fn visit_inline(&mut self, _inline: &Inline) {}
 }
 
-/// Walk a whole [`Document`]: every top-level block via [`walk_block`].
+/// Walk a whole [`Document`]: every top-level block via [`walk_block`]
+/// (footnote definitions included, so their content is visible to visitors).
 /// (Frontmatter and reference definitions carry no inline content and need
 /// no traversal; read them off [`Document`] directly.)
 pub fn walk_document<V: Visitor>(doc: &Document, visitor: &mut V) {
@@ -83,6 +84,23 @@ pub fn walk_block<V: Visitor>(block: &Block, visitor: &mut V) {
                 }
             }
         }
+        Block::FootnoteDefinition(def) => {
+            for child in &def.blocks {
+                walk_block(child, visitor);
+            }
+        }
+        Block::DefinitionList(list) => {
+            for item in &list.items {
+                for term in &item.terms {
+                    walk_inlines(&term.content, visitor);
+                }
+                for desc in &item.descriptions {
+                    for child in &desc.blocks {
+                        walk_block(child, visitor);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -99,6 +117,7 @@ pub fn walk_inline<V: Visitor>(inline: &Inline, visitor: &mut V) {
         | Inline::Code(_)
         | Inline::Image(_)
         | Inline::Autolink(_)
+        | Inline::FootnoteReference(_)
         | Inline::RawHtml(_)
         | Inline::HardBreak
         | Inline::SoftBreak => {}

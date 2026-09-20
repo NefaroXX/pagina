@@ -35,6 +35,13 @@ pub enum InlineElement {
         url: String,
         title: Option<String>,
     },
+    /// GFM footnote reference (`number == 0` means unresolved: renders as
+    /// the literal `[^label]` source form).
+    FootnoteRef {
+        label: String,
+        number: usize,
+        occurrence: usize,
+    },
     RawHtml(String),
     HardBreak,
     SoftBreak,
@@ -82,6 +89,17 @@ impl InlineElement {
                     escape_html(alt)
                 ),
             },
+            InlineElement::FootnoteRef {
+                label,
+                number,
+                occurrence,
+            } => {
+                if *number == 0 {
+                    escape_html(&format!("[^{}]", label))
+                } else {
+                    footnote_ref_html(label, *number, *occurrence)
+                }
+            }
             InlineElement::RawHtml(s) => s.clone(),
             InlineElement::HardBreak => "<br />\n".to_string(),
             InlineElement::SoftBreak => "\n".to_string(),
@@ -112,6 +130,7 @@ impl InlineElement {
                 }
             }
             InlineElement::Image { alt, url, .. } => format!("![{}]({})", alt, url),
+            InlineElement::FootnoteRef { label, .. } => format!("[^{}]", label),
             InlineElement::RawHtml(s) => s.clone(),
             InlineElement::HardBreak => "  \n".to_string(),
             InlineElement::SoftBreak => "\n".to_string(),
@@ -123,9 +142,30 @@ impl InlineElement {
 // Tokenizer + delimiter-stack emphasis (CommonMark appendix algorithm)
 // ---------------------------------------------------------------------------
 
+/// Shared GFM footnote-reference anchor HTML (legacy + AST renderers stay
+/// byte-identical through this helper). `occurrence == 1` takes `fnref-N`;
+/// repeats take unique `fnref-N-K` anchors.
+pub(crate) fn footnote_ref_html(label: &str, number: usize, occurrence: usize) -> String {
+    let _ = label;
+    let id = if occurrence <= 1 {
+        format!("fnref-{}", number)
+    } else {
+        format!("fnref-{}-{}", number, occurrence)
+    };
+    format!(
+        "<sup class=\"footnote-ref\"><a href=\"#fn-{}\" id=\"{}\" data-footnote-ref>{}</a></sup>",
+        number, id, number
+    )
+}
+
 #[derive(Debug, Clone)]
 enum Tok {
     Text(String),
+    /// GFM `[^label]` reference (resolution + numbering happen later, once
+    /// the definition map is consulted).
+    FootnoteRef {
+        label: String,
+    },
     Delim {
         ch: char,
         len: usize,
@@ -647,6 +687,27 @@ fn parse_link_title(chars: &[char], i: usize) -> Option<(String, usize)> {
     None
 }
 
+/// Scan `[^label]` at position i (chars[i] == '['). The label is the raw
+/// text between `[^` and the next `]`: single-line (no newlines), non-empty
+/// after trimming. Returns (label, next index past `]`).
+fn scan_footnote_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
+    if chars[i] != '[' || i + 1 >= chars.len() || chars[i + 1] != '^' {
+        return None;
+    }
+    let mut j = i + 2;
+    while j < chars.len() && chars[j] != ']' && chars[j] != '\n' && chars[j] != '\r' {
+        j += 1;
+    }
+    if j >= chars.len() || chars[j] != ']' {
+        return None;
+    }
+    let label: String = chars[i + 2..j].iter().collect();
+    if label.trim().is_empty() {
+        return None;
+    }
+    Some((label, j + 1))
+}
+
 /// Parse `[label]` at position i (chars[i] == '['). Returns (label, next).
 fn parse_bracket_label(chars: &[char], i: usize) -> Option<(String, usize)> {
     if chars[i] != '[' {
@@ -847,6 +908,20 @@ fn tokenize_links(input: &str, refs: &RefDefs, gfm: bool) -> Vec<Tok> {
             prev_char = Some('[');
             i += 2;
             continue;
+        }
+        // GFM footnote reference `[^label]`. Only the reference form is
+        // recognized (no pandoc-style inline `^[...]` notes); resolution
+        // against definitions happens later, so undefined labels fall back
+        // to literal text there. Invalid shapes fall through to the normal
+        // bracket path below and stay literal.
+        if gfm && c == '[' && i + 1 < chars.len() && chars[i + 1] == '^' {
+            if let Some((label, next)) = scan_footnote_ref(&chars, i) {
+                flush_text(&mut toks, &mut text_buf);
+                toks.push(Tok::FootnoteRef { label });
+                prev_char = Some('x');
+                i = next;
+                continue;
+            }
         }
         // Bracket open
         if c == '[' {
@@ -1273,6 +1348,14 @@ fn toks_to_elements(toks: &[Tok]) -> Vec<InlineElement> {
                 }
                 i += 1;
             }
+            Tok::FootnoteRef { label } => {
+                out.push(InlineElement::FootnoteRef {
+                    label: label.clone(),
+                    number: 0,
+                    occurrence: 0,
+                });
+                i += 1;
+            }
             Tok::Code(s) if s == "\0EM\0" => {
                 // find matching close
                 let mut j = i + 1;
@@ -1435,11 +1518,60 @@ fn elements_to_plain(elems: &[InlineElement]) -> String {
                 }
             }
             InlineElement::Image { alt, .. } => s.push_str(alt),
+            InlineElement::FootnoteRef { label, .. } => {
+                s.push_str("[^");
+                s.push_str(label);
+                s.push(']');
+            }
             InlineElement::RawHtml(h) => s.push_str(h),
             InlineElement::HardBreak | InlineElement::SoftBreak => s.push('\n'),
         }
     }
     s
+}
+
+/// Resolve GFM footnote references in legacy elements: defined labels take
+/// their first-reference number plus a per-label occurrence index (via
+/// `state`); undefined labels degrade to literal `[^label]` text.
+///
+/// Called from the block renderer after inline parsing, only when GFM is on
+/// and the document defines footnotes — CommonMark rendering never reaches
+/// here (the tokenizer gate keeps `[^…]` plain text there).
+pub(crate) fn resolve_footnote_refs(
+    elems: &mut [InlineElement],
+    foot: &crate::markdown_to_html::FootnoteMap,
+    state: &mut crate::markdown_to_html::FootnoteState,
+) {
+    let mut k = 0usize;
+    while k < elems.len() {
+        let replacement = match &elems[k] {
+            InlineElement::FootnoteRef { label, number, .. } if *number == 0 => {
+                let label = label.clone();
+                if foot.contents.contains_key(&label) {
+                    let (number, occurrence) = state.mark(&label);
+                    Some(InlineElement::FootnoteRef {
+                        label,
+                        number,
+                        occurrence,
+                    })
+                } else {
+                    Some(InlineElement::Text(format!("[^{}]", label)))
+                }
+            }
+            _ => None,
+        };
+        if let Some(rep) = replacement {
+            elems[k] = rep;
+        }
+        match &mut elems[k] {
+            InlineElement::Bold(c) | InlineElement::Italic(c) | InlineElement::Strikethrough(c) => {
+                resolve_footnote_refs(c, foot, state)
+            }
+            InlineElement::Link { text, .. } => resolve_footnote_refs(text, foot, state),
+            _ => {}
+        }
+        k += 1;
+    }
 }
 
 /// True when inline elements contain a nested link or image.
@@ -1754,20 +1886,45 @@ pub fn render_inline_md(elements: &[InlineElement]) -> String {
 // styles, and angle vs bare autolinks. Anything this pipeline does wrong
 // affects only the new AST entry points, never legacy output.
 
-use crate::ast::{Autolink, Image as AstImage, Inline as AstInline, Link as AstLink, LinkStyle};
+use crate::ast::{
+    Autolink, FootnoteReference as AstFootnoteReference, Image as AstImage, Inline as AstInline,
+    Link as AstLink, LinkStyle,
+};
 
 /// Parse inline Markdown into public-AST nodes (reference definitions and
 /// GFM gating supplied by the caller, mirroring [`parse_inline_opts`]).
-pub(crate) fn parse_inline_ast(input: &str, refs: &RefDefs, gfm: bool) -> Vec<AstInline> {
+///
+/// `footnotes` holds the defined footnote labels; `forder` accumulates
+/// first-reference order across the whole document (shared by every inline
+/// string, so numbers match render order). Undefined `[^…]` labels degrade
+/// to literal text.
+pub(crate) fn parse_inline_ast(
+    input: &str,
+    refs: &RefDefs,
+    gfm: bool,
+    footnotes: &std::collections::HashSet<String>,
+    forder: &mut Vec<String>,
+) -> Vec<AstInline> {
     // Trailing spaces/tabs at the very end are stripped (no hard break).
     let input = input.trim_end_matches([' ', '\t']);
     let mut toks = tokenize_links(input, refs, gfm);
     resolve_emphasis_ast(&mut toks);
-    let mut elems = toks_to_ast(&toks);
+    let mut elems = toks_to_ast(&toks, footnotes, forder);
     if gfm {
         elems = linkify_ast(elems);
     }
     elems
+}
+
+/// Number a defined footnote label in first-reference order.
+fn footnote_number(forder: &mut Vec<String>, label: &str) -> usize {
+    match forder.iter().position(|l| l == label) {
+        Some(k) => k + 1,
+        None => {
+            forder.push(label.to_string());
+            forder.len()
+        }
+    }
 }
 
 /// Map a recorded [`LinkKind`] to the public [`LinkStyle`].
@@ -2018,19 +2175,40 @@ fn tagged_literal(kind: u8, delim: char) -> String {
     }
 }
 
+/// Push literal text onto AST inlines, merging with a previous run.
+fn push_ast_text(out: &mut Vec<AstInline>, s: &str) {
+    if let Some(AstInline::Text(prev)) = out.last_mut() {
+        prev.push_str(s);
+    } else {
+        out.push(AstInline::Text(s.to_string()));
+    }
+}
+
 /// Build public-AST inlines from emphasis-resolved tokens, mirroring
 /// [`toks_to_elements`] (same nesting, same alt-text rule) plus style and
 /// delimiter retention.
-fn toks_to_ast(toks: &[Tok]) -> Vec<AstInline> {
+fn toks_to_ast(
+    toks: &[Tok],
+    footnotes: &std::collections::HashSet<String>,
+    forder: &mut Vec<String>,
+) -> Vec<AstInline> {
     let mut out: Vec<AstInline> = Vec::new();
     let mut i = 0usize;
     while i < toks.len() {
         match &toks[i] {
             Tok::Text(s) => {
-                if let Some(AstInline::Text(prev)) = out.last_mut() {
-                    prev.push_str(s);
+                push_ast_text(&mut out, s);
+                i += 1;
+            }
+            Tok::FootnoteRef { label } => {
+                if footnotes.contains(label) {
+                    let number = footnote_number(forder, label);
+                    out.push(AstInline::FootnoteReference(AstFootnoteReference {
+                        label: label.clone(),
+                        number,
+                    }));
                 } else {
-                    out.push(AstInline::Text(s.clone()));
+                    push_ast_text(&mut out, &format!("[^{}]", label));
                 }
                 i += 1;
             }
@@ -2070,7 +2248,7 @@ fn toks_to_ast(toks: &[Tok]) -> Vec<AstInline> {
                         j += 1;
                     }
                     if j < toks.len() {
-                        let inner = toks_to_ast(&toks[i + 1..j]);
+                        let inner = toks_to_ast(&toks[i + 1..j], footnotes, forder);
                         out.push(match kind {
                             0 => AstInline::Emphasis {
                                 delimiter: delim,
@@ -2125,7 +2303,7 @@ fn toks_to_ast(toks: &[Tok]) -> Vec<AstInline> {
                 title,
                 style,
             } => {
-                let inner = toks_to_ast(children);
+                let inner = toks_to_ast(children, footnotes, forder);
                 if *style == LinkKind::Angle {
                     out.push(AstInline::Autolink(Autolink {
                         url: url.clone(),
@@ -2148,7 +2326,7 @@ fn toks_to_ast(toks: &[Tok]) -> Vec<AstInline> {
                 title,
                 style,
             } => {
-                let inner = toks_to_ast(children);
+                let inner = toks_to_ast(children, footnotes, forder);
                 let alt = ast_image_alt(&inner);
                 out.push(AstInline::Image(Box::new(AstImage {
                     alt,
@@ -2187,6 +2365,11 @@ fn ast_image_alt(elems: &[AstInline]) -> String {
             }
             AstInline::Image(img) => s.push_str(&img.alt),
             AstInline::Autolink(a) => s.push_str(&a.text),
+            AstInline::FootnoteReference(r) => {
+                s.push_str("[^");
+                s.push_str(&r.label);
+                s.push(']');
+            }
             AstInline::RawHtml(h) => s.push_str(h),
             AstInline::HardBreak | AstInline::SoftBreak => s.push('\n'),
         }

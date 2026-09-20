@@ -209,6 +209,8 @@ struct MdConverter {
     pos: usize,
     in_pre: bool,
     gfm: bool,
+    /// Inside a footnote `<li>`: backref anchors are swallowed.
+    in_footnote_li: bool,
 }
 
 /// Per-column alignment of an HTML table, derived from `align`/`style`
@@ -283,6 +285,7 @@ impl MdConverter {
             pos: 0,
             in_pre: false,
             gfm: false,
+            in_footnote_li: false,
         }
     }
 
@@ -292,6 +295,7 @@ impl MdConverter {
             pos: 0,
             in_pre: false,
             gfm,
+            in_footnote_li: false,
         }
     }
 
@@ -416,6 +420,12 @@ impl MdConverter {
                         format!("\n```\n{}\n```\n", content.trim_end())
                     }
                     "a" => {
+                        // Footnote backlinks vanish inside footnote bodies:
+                        // they are anchor chrome, not content.
+                        if self.gfm && self.in_footnote_li && is_backref_anchor(&attrs) {
+                            self.convert_until_end("a");
+                            return String::new();
+                        }
                         let href = attrs
                             .iter()
                             .find(|(k, _)| k == "href")
@@ -427,6 +437,45 @@ impl MdConverter {
                         } else {
                             format!("[{}]({})", content, href)
                         }
+                    }
+                    "sup" => {
+                        // GFM footnote reference: `<sup><a
+                        // href="#fn-N">N</a></sup>` becomes `[^N]`.
+                        // Anything else unwraps to its content.
+                        if self.gfm {
+                            match self.scan_footnote_sup() {
+                                Some(label) => format!("[^{}]", label),
+                                None => self.convert_until_end("sup"),
+                            }
+                        } else {
+                            self.convert_until_end("sup")
+                        }
+                    }
+                    "section" | "div" => {
+                        // GFM footnotes footer back to `[^N]: …` definitions.
+                        // Anything else unwraps to its content.
+                        if self.gfm && has_footnotes_class(&attrs) {
+                            let content = self.convert_footnote_section(&name);
+                            format!("\n{}\n", content.trim())
+                        } else {
+                            self.convert_until_end(&name)
+                        }
+                    }
+                    "dl" => {
+                        // GFM definition list back to term / `: desc` form.
+                        if self.gfm {
+                            let content = self.convert_deflist();
+                            format!("\n{}\n", content.trim())
+                        } else {
+                            self.convert_until_end(&name)
+                        }
+                    }
+                    "dt" | "dd" => {
+                        // Stray term/description outside any `<dl>` (which
+                        // consumes its own): keep content readable without
+                        // inventing markers, in both modes.
+                        let content = self.convert_until_end(&name);
+                        format!("\n{}\n", content.trim())
                     }
                     "ul" => {
                         let content = self.convert_until_end("ul");
@@ -649,6 +698,162 @@ impl MdConverter {
         rows
     }
 
+    /// Scan a `<sup>…</sup>` body (start tag already consumed) for a
+    /// footnote anchor (`<a href="#fn-N">`). On a hit the whole element is
+    /// consumed and the footnote label returned; otherwise nothing is
+    /// consumed and the caller falls back to generic children conversion.
+    fn scan_footnote_sup(&mut self) -> Option<String> {
+        let mut k = self.pos;
+        let mut depth = 0usize;
+        let mut found: Option<String> = None;
+        while k < self.tokens.len() {
+            match &self.tokens[k] {
+                HtmlToken::StartTag { name, attrs, .. } => {
+                    if name == "a" {
+                        if let Some((_, href)) = attrs.iter().find(|(a, _)| a == "href") {
+                            if let Some(label) = href.strip_prefix("#fn-") {
+                                if !label.is_empty() {
+                                    found = Some(label.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if name == "sup" {
+                        depth += 1;
+                    }
+                    k += 1;
+                }
+                HtmlToken::EndTag(name) if name == "sup" => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                    k += 1;
+                }
+                _ => {
+                    k += 1;
+                }
+            }
+            if found.is_some() {
+                // Skip to the matching `</sup>` so the whole element is
+                // consumed exactly once.
+                while k < self.tokens.len() {
+                    match &self.tokens[k] {
+                        HtmlToken::EndTag(name) if name == "sup" => {
+                            if depth == 0 {
+                                k += 1;
+                                break;
+                            }
+                            depth = depth.saturating_sub(1);
+                            k += 1;
+                        }
+                        HtmlToken::StartTag { name, .. } if name == "sup" => {
+                            depth += 1;
+                            k += 1;
+                        }
+                        _ => k += 1,
+                    }
+                }
+                self.pos = k;
+                return found;
+            }
+        }
+        None
+    }
+
+    /// Convert a footnotes footer (`<section>`/`<div class="footnotes">`,
+    /// start tag already consumed) into `[^N]: …` definitions, consuming
+    /// through the matching end tag. Backref anchors are swallowed;
+    /// `<hr>` separators are skipped.
+    fn convert_footnote_section(&mut self, tag_name: &str) -> String {
+        let mut defs: Vec<String> = Vec::new();
+        while self.pos < self.tokens.len() {
+            match self.peek() {
+                Some(HtmlToken::EndTag(name)) if name == tag_name => {
+                    self.advance();
+                    break;
+                }
+                Some(HtmlToken::StartTag { name, attrs, .. }) if name == "li" => {
+                    let attrs = attrs.clone();
+                    self.advance();
+                    let label = attrs
+                        .iter()
+                        .find(|(k, _)| k == "id")
+                        .map(|(_, v)| v.strip_prefix("fn-").unwrap_or(v).to_string())
+                        .unwrap_or_default();
+                    let was = self.in_footnote_li;
+                    self.in_footnote_li = true;
+                    let content = self.convert_until_end("li");
+                    self.in_footnote_li = was;
+                    if !label.is_empty() {
+                        defs.push(format_reverse_def(&label, content.trim()));
+                    }
+                }
+                Some(HtmlToken::StartTag { name, .. }) if name == "hr" => {
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        defs.join("\n\n")
+    }
+
+    /// Convert a `<dl>` element (start tag already consumed) into term /
+    /// `: description` form, consuming through `</dl>`. Multi-paragraph
+    /// descriptions keep later paragraphs 4-space indented so they re-parse
+    /// into the same description.
+    fn convert_deflist(&mut self) -> String {
+        let mut items: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+        let mut terms: Vec<String> = Vec::new();
+        let mut descs: Vec<String> = Vec::new();
+        while self.pos < self.tokens.len() {
+            match self.peek() {
+                Some(HtmlToken::EndTag(name)) if name == "dl" => {
+                    self.advance();
+                    break;
+                }
+                Some(HtmlToken::StartTag { name, .. }) if name == "dt" => {
+                    self.advance();
+                    let content = self.convert_until_end("dt");
+                    let term = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                    // A term after descriptions starts a new item sharing
+                    // nothing with the previous one.
+                    if !descs.is_empty() {
+                        items.push((std::mem::take(&mut terms), std::mem::take(&mut descs)));
+                    }
+                    if !term.is_empty() {
+                        terms.push(term);
+                    }
+                }
+                Some(HtmlToken::StartTag { name, .. }) if name == "dd" => {
+                    self.advance();
+                    let content = self.convert_until_end("dd");
+                    descs.push(format_reverse_desc(content.trim()));
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        if !terms.is_empty() || !descs.is_empty() {
+            items.push((terms, descs));
+        }
+        let mut out = String::new();
+        for (terms, descs) in &items {
+            for term in terms {
+                out.push_str(term);
+                out.push('\n');
+            }
+            for desc in descs {
+                out.push_str(desc);
+                out.push('\n');
+            }
+        }
+        out.trim_end().to_string()
+    }
+
     /// Collect the cells of one `<tr>` row, consuming through `</tr>`.
     fn collect_table_row(&mut self, in_thead: bool) -> TableRow {
         let mut cells: Vec<(String, Alignment)> = Vec::new();
@@ -683,6 +888,74 @@ impl MdConverter {
             in_thead,
         }
     }
+}
+
+/// True when a `<section>`/`<div>` tag's attributes mark a footnotes footer
+/// (`class="… footnotes …"`, the forward converter's shape).
+fn has_footnotes_class(attrs: &[(String, String)]) -> bool {
+    attrs
+        .iter()
+        .find(|(k, _)| k == "class")
+        .map(|(_, v)| v.split_whitespace().any(|c| c == "footnotes"))
+        .unwrap_or(false)
+}
+
+/// True when an anchor's attributes mark a footnote backlink (swallowed
+/// inside footnote bodies on the reverse path).
+fn is_backref_anchor(attrs: &[(String, String)]) -> bool {
+    if attrs.iter().any(|(k, _)| k == "data-footnote-backref") {
+        return true;
+    }
+    attrs
+        .iter()
+        .find(|(k, _)| k == "class")
+        .map(|(_, v)| v.split_whitespace().any(|c| c == "footnote-backref"))
+        .unwrap_or(false)
+}
+
+/// Format one reversed footnote definition: `[^label]: first paragraph`,
+/// later paragraphs blank-separated and 4-space indented (mirrors the AST
+/// Markdown emitter so output re-parses into the same definition).
+fn format_reverse_def(label: &str, content: &str) -> String {
+    let paras: Vec<&str> = content.split("\n\n").collect();
+    let first = paras.first().copied().unwrap_or("").replace('\n', " ");
+    let mut out = format!("[^{}]: {}", label, first.trim());
+    for para in paras.iter().skip(1) {
+        out.push_str("\n\n");
+        for line in para.lines() {
+            if line.trim().is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str("    ");
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+        }
+        out.truncate(out.trim_end().len());
+    }
+    out
+}
+
+/// Format one reversed description: `: first paragraph`, later paragraphs
+/// blank-separated and 4-space indented.
+fn format_reverse_desc(content: &str) -> String {
+    let paras: Vec<&str> = content.split("\n\n").collect();
+    let first = paras.first().copied().unwrap_or("").replace('\n', " ");
+    let mut out = format!(": {}", first.trim());
+    for para in paras.iter().skip(1) {
+        out.push_str("\n\n");
+        for line in para.lines() {
+            if line.trim().is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str("    ");
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+        }
+        out.truncate(out.trim_end().len());
+    }
+    out
 }
 
 /// True when an `<input>` tag's attributes describe a checkbox.
@@ -722,10 +995,14 @@ fn is_bare_anchor(content: &str, href: &str) -> bool {
 /// Conversion options for HTML → Markdown.
 ///
 /// `gfm: false` (the default) keeps CommonMark-compatible output: `<del>` /
-/// `<s>` unwrap to plain text, checkbox inputs vanish, and every link keeps
-/// its `[text](href)` form. `gfm: true` renders `<del>`/`<s>`/`<strike>` as
-/// `~~`, checkbox inputs as `[ ]`/`[x]` prefixes, and already-bare anchors
-/// as plain URLs/emails.
+/// `<s>` unwrap to plain text, checkbox inputs vanish, every link keeps
+/// its `[text](href)` form, footnote sections flatten to plain content and
+/// `<dl>`/`<dt>`/`<dd>` unwrap to plain content. `gfm: true` renders
+/// `<del>`/`<s>`/`<strike>` as `~~`, checkbox inputs as `[ ]`/`[x]`
+/// prefixes, already-bare anchors as plain URLs/emails, footnote reference
+/// `<sup>` elements as `[^N]` with their `<section class="footnotes">`
+/// footer back as `[^N]: …` definitions, and `<dl>` elements as term /
+/// `: description` definition lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Options {
     /// Enable GFM extensions in the reverse direction.
@@ -746,7 +1023,8 @@ impl Options {
 ///
 /// Supports headings, paragraphs, bold/italic, code spans and blocks, links,
 /// ordered and unordered lists, blockquotes, horizontal rules, GFM pipe
-/// tables, `<br>`, `<img>`, and HTML entity unescaping.
+/// tables, `<br>`, `<img>`, GFM footnotes and definition lists (see
+/// [`Options`]), and HTML entity unescaping.
 ///
 /// # Examples
 ///

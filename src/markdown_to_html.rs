@@ -66,6 +66,22 @@ pub(crate) enum Block {
         alignments: Vec<Alignment>,
         rows: Vec<Vec<String>>,
     },
+    /// PHP-Markdown-Extra-style definition list (GFM-gated; see
+    /// [`parse_deflist`]). Terms render as `<dt>`, descriptions as `<dd>`.
+    DefinitionList {
+        /// Tight (single-paragraph descriptions unwrap `<p>`) vs loose.
+        tight: bool,
+        items: Vec<DefListItem>,
+    },
+}
+
+/// One definition-list entry: terms sharing one or more descriptions.
+#[derive(Debug, Clone)]
+pub(crate) struct DefListItem {
+    /// Raw term lines (inline-parsed at render/AST-convert time).
+    pub(crate) terms: Vec<String>,
+    /// One block list per `:` description.
+    pub(crate) descriptions: Vec<Vec<Block>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1126,119 @@ fn parse_ref_title(wc: &[char], i: usize) -> Option<(String, usize)> {
 }
 
 // ---------------------------------------------------------------------------
+// Footnote definitions (GFM-gated, cmark-gfm footnote extension shape)
+// ---------------------------------------------------------------------------
+
+/// Collected footnote definitions: definition order plus label -> content
+/// blocks. Built top-level-only in [`parse_document_blocks_opts`] (two-pass,
+/// mirroring link reference definitions: first definition wins, definitions
+/// apply regardless of position, later duplicates vanish).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FootnoteMap {
+    /// Labels in first-definition order (drives unreferenced-def fallback).
+    pub(crate) order: Vec<String>,
+    /// Label -> parsed content blocks (parsed with complete refdefs).
+    pub(crate) contents: std::collections::HashMap<String, Vec<Block>>,
+}
+
+impl FootnoteMap {
+    fn is_empty(&self) -> bool {
+        self.contents.is_empty()
+    }
+}
+
+/// Per-render footnote numbering state (GFM only). Numbers follow first
+/// reference order (not definition order); repeat references share the
+/// number but take unique `fnref-N-K` anchors so every backlink is unique.
+#[derive(Debug, Default)]
+pub(crate) struct FootnoteState {
+    /// Labels in first-reference order.
+    pub(crate) order: Vec<String>,
+    /// Label -> total references seen so far (occurrence index source).
+    pub(crate) counts: std::collections::HashMap<String, usize>,
+}
+
+impl FootnoteState {
+    /// Record one reference to a defined `label`; returns (number, occurrence).
+    pub(crate) fn mark(&mut self, label: &str) -> (usize, usize) {
+        let number = match self.order.iter().position(|l| l == label) {
+            Some(k) => k + 1,
+            None => {
+                self.order.push(label.to_string());
+                self.order.len()
+            }
+        };
+        let occurrence = self.counts.entry(label.to_string()).or_insert(0);
+        *occurrence += 1;
+        (number, *occurrence)
+    }
+}
+
+/// Raw (unparsed) footnote definition: label, content lines, lines consumed.
+struct FootnoteRaw {
+    label: String,
+    content: Vec<String>,
+    consumed: usize,
+}
+
+/// Try to parse a footnote definition starting at `lines[i]`.
+///
+/// Shape (cmark-gfm, documented choice): up to 3 columns indent, `[^`,
+/// a non-empty label without `]`, `]:`, then a space/tab/EOL plus optional
+/// content. Following blank lines and 4+ indented lines belong to the
+/// definition (dedented by 4); anything else ends it. Labels match
+/// case-sensitively; the first definition wins (duplicates are still
+/// consumed and dropped, like link refdefs).
+fn try_footnote_def(lines: &[PLine], i: usize) -> Option<FootnoteRaw> {
+    if indent_rel(&lines[i]) > 3 {
+        return None;
+    }
+    let t = strip_cols(&lines[i], 3).s;
+    let rest = t.strip_prefix("[^")?;
+    let close = rest.find(']')?;
+    let label = rest[..close].to_string();
+    if label.trim().is_empty() {
+        return None;
+    }
+    let after = &rest[close + 1..];
+    let after_colon = after.strip_prefix(':')?;
+    let first = match after_colon.chars().next() {
+        None => String::new(),
+        Some(' ') | Some('\t') => after_colon[1..].trim_end().to_string(),
+        Some(_) => return None,
+    };
+    let mut content: Vec<String> = Vec::new();
+    if !first.is_empty() {
+        content.push(first);
+    }
+    let mut consumed = 1usize;
+    while i + consumed < lines.len() {
+        let line = &lines[i + consumed];
+        if is_blank(&line.s) {
+            content.push(String::new());
+            consumed += 1;
+        } else if indent_rel(line) >= 4 {
+            content.push(strip_cols(line, 4).s);
+            consumed += 1;
+        } else {
+            break;
+        }
+    }
+    // Drop trailing blanks (they belong to the following block).
+    let mut trailing = 0usize;
+    while content.last().map(|s| s.is_empty()).unwrap_or(false) {
+        content.pop();
+        trailing += 1;
+    }
+    consumed -= trailing;
+    Some(FootnoteRaw {
+        label,
+        content,
+        consumed,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Block parser (container-block model with lazy continuation)
 // ---------------------------------------------------------------------------
 
@@ -1278,13 +1407,22 @@ fn is_interrupting_block_start(line: &PLine, in_para: bool) -> bool {
     false
 }
 
-fn parse_blocks(lines: &[PLine], refs: &mut RefDefs) -> Vec<Block> {
-    parse_blocks_spanned(lines, refs).0
+fn parse_blocks(lines: &[PLine], refs: &mut RefDefs, gfm: bool) -> Vec<Block> {
+    parse_blocks_spanned(lines, refs, gfm).0
 }
 
 /// Parse blocks, also returning each top-level block's consumed line span
 /// `[start, end)` in `lines` coordinates (used for tight/loose detection).
-fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec<(usize, usize)>) {
+///
+/// `gfm` gates the two block extensions (definition lists; footnote
+/// references are inline-level): with `gfm: false` the parser is pure
+/// CommonMark and byte-identical to before. Footnote *definitions* never
+/// appear here — the top-level entry point strips their lines first.
+fn parse_blocks_spanned(
+    lines: &[PLine],
+    refs: &mut RefDefs,
+    gfm: bool,
+) -> (Vec<Block>, Vec<(usize, usize)>) {
     let mut blocks: Vec<Block> = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut para: Vec<PLine> = Vec::new();
@@ -1476,7 +1614,7 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
             while inner.last().map(|l| l.s.is_empty()).unwrap_or(false) {
                 inner.pop();
             }
-            let children = parse_blocks(&inner, refs);
+            let children = parse_blocks(&inner, refs, gfm);
             blocks.push(Block::BlockQuote(children));
             spans.push((bs, i));
             continue;
@@ -1490,12 +1628,31 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
                 // Fall through to paragraph continuation.
             } else {
                 flush_para(&mut blocks, &mut spans, &mut para, i);
-                let (list_block, next_i) = parse_list(lines, i, refs);
+                let (list_block, next_i) = parse_list(lines, i, refs, gfm);
                 blocks.push(list_block);
                 spans.push((i, next_i));
                 i = next_i;
                 continue;
             }
+        }
+
+        // GFM definition list: a pending unindented term paragraph closed
+        // by a `:` description marker (PHP Markdown Extra shape, GFM-gated
+        // so CommonMark output cannot move).
+        if gfm
+            && !para.is_empty()
+            && !lines[i].lazy
+            && is_def_marker(&lines[i]).is_some()
+            && lines[i - para.len()..i].iter().all(|l| indent_rel(l) == 0)
+        {
+            let ps = i - para.len();
+            let terms: Vec<String> = para.iter().map(|l| l.s.clone()).collect();
+            para.clear();
+            let (dl_block, next_i) = parse_deflist(lines, i, terms, refs, gfm);
+            blocks.push(dl_block);
+            spans.push((ps, next_i));
+            i = next_i;
+            continue;
         }
 
         // GFM table: a delimiter row (indent < 4, not a lazy line) that
@@ -1600,7 +1757,7 @@ fn parse_blocks_spanned(lines: &[PLine], refs: &mut RefDefs) -> (Vec<Block>, Vec
 /// Parse a full list starting at `start`. Returns (block, next index).
 /// All indentation is frame-relative (spec ex 259-260); tab phases ride
 /// along in each line.
-fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usize) {
+fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs, gfm: bool) -> (Block, usize) {
     let first = parse_list_marker(&lines[start]).expect("list marker");
     let ordered = first.ordered;
     let delim = first.delim;
@@ -1759,7 +1916,7 @@ fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usiz
         while r.last().map(|l| l.s.is_empty()).unwrap_or(false) {
             r.pop();
         }
-        let (blocks, spans) = parse_blocks_spanned(&r, refs);
+        let (blocks, spans) = parse_blocks_spanned(&r, refs, gfm);
         for (idx, l) in r.iter().enumerate() {
             if !l.s.is_empty() {
                 continue;
@@ -1787,28 +1944,241 @@ fn parse_list(lines: &[PLine], start: usize, refs: &mut RefDefs) -> (Block, usiz
 }
 
 // ---------------------------------------------------------------------------
+// Definition lists (GFM-gated, PHP Markdown Extra shape)
+// ---------------------------------------------------------------------------
+
+/// A `:` description marker: up to 3 columns indent, `:`, then a
+/// space/tab/EOL. Returns the description text after the marker.
+/// A lone `:` with no text starts an empty description.
+fn is_def_marker(line: &PLine) -> Option<String> {
+    let t = after_small_indent(line)?.s;
+    let rest = t.strip_prefix(':')?;
+    match rest.chars().next() {
+        None => Some(String::new()),
+        Some(' ') | Some('\t') => Some(rest[1..].trim_end().to_string()),
+        Some(_) => None,
+    }
+}
+
+/// Parse a definition list starting at the first `:` marker (`start`), with
+/// the already-collected term lines. Returns (block, next index).
+///
+/// Documented shape choices (PHP Markdown Extra):
+/// - each pending-paragraph line is one term; consecutive term paragraphs
+///   each followed by `:` descriptions share one `<dl>`;
+/// - every `:` line starts one `<dd>`; its text plus following blank and
+///   4+ indented lines form the description body (multi-block `<dd>`);
+/// - tight when no blank line appears inside the list and every description
+///   is a single paragraph (then `<dd>` unwraps `<p>`, mirroring tight
+///   lists); otherwise loose.
+fn parse_deflist(
+    lines: &[PLine],
+    start: usize,
+    first_terms: Vec<String>,
+    refs: &mut RefDefs,
+    gfm: bool,
+) -> (Block, usize) {
+    let mut items: Vec<DefListItem> = Vec::new();
+    let mut loose = false;
+    let mut i = start;
+    let n = lines.len();
+    let mut terms = first_terms;
+    // A blank gap inside the list loosens it, but only when more list
+    // content follows (trailing blanks at the end belong to the next block).
+    let mut gap_pending = false;
+
+    loop {
+        // Collect one or more `:` descriptions for the current terms.
+        let mut descriptions: Vec<Vec<Block>> = Vec::new();
+        let mut saw_desc = false;
+        while i < n {
+            if is_blank(&lines[i].s) {
+                // Unreachable in practice (description bodies consume
+                // their blanks), kept as a safety net.
+                loose = true;
+                gap_pending = false;
+                i += 1;
+                continue;
+            }
+            match is_def_marker(&lines[i]) {
+                Some(first) => {
+                    saw_desc = true;
+                    if gap_pending {
+                        loose = true;
+                    }
+                    gap_pending = false;
+                    i += 1;
+                    let mut body: Vec<PLine> = Vec::new();
+                    if !first.is_empty() {
+                        body.push(PLine::fresh(first));
+                    }
+                    // Continuation: blanks and 4+ indented lines. A further
+                    // `:` marker (indent <= 3) starts the next description.
+                    while i < n {
+                        if is_blank(&lines[i].s) {
+                            body.push(PLine::fresh(String::new()));
+                            i += 1;
+                        } else if indent_rel(&lines[i]) >= 4 {
+                            body.push(strip_cols(&lines[i], 4));
+                            i += 1;
+                        } else {
+                            // A further `:` marker (or any other line) ends
+                            // this description; the outer loop re-checks.
+                            break;
+                        }
+                    }
+                    // Trim edge blanks; a blank *inside* the body loosens.
+                    // Trailing blanks arm `gap_pending`: they loosen only
+                    // when further list content follows them.
+                    while body.first().map(|l| l.s.is_empty()).unwrap_or(false) {
+                        body.remove(0);
+                    }
+                    let mut trailing = 0usize;
+                    while body.last().map(|l| l.s.is_empty()).unwrap_or(false) {
+                        body.pop();
+                        trailing += 1;
+                    }
+                    if trailing > 0 {
+                        gap_pending = true;
+                    }
+                    if body.iter().any(|l| l.s.is_empty()) {
+                        loose = true;
+                    }
+                    let content = if body.is_empty() {
+                        Vec::new()
+                    } else {
+                        parse_blocks(&body, refs, gfm)
+                    };
+                    // Multi-block descriptions always render loose.
+                    if content.len() > 1
+                        || content
+                            .first()
+                            .map(|b| !matches!(b, Block::Paragraph(_)))
+                            .unwrap_or(false)
+                    {
+                        loose = true;
+                    }
+                    descriptions.push(content);
+                }
+                None => break,
+            }
+        }
+        if saw_desc {
+            items.push(DefListItem {
+                terms: std::mem::take(&mut terms),
+                descriptions,
+            });
+        } else if items.is_empty() {
+            // Unreachable (caller guarantees a marker at `start`), but keep
+            // total: fall back to a paragraph so no input is ever dropped.
+            items.push(DefListItem {
+                terms: std::mem::take(&mut terms),
+                descriptions: vec![Vec::new()],
+            });
+            break;
+        } else {
+            break;
+        }
+        // Continue the same list only when fresh unindented term lines are
+        // followed by another `:` marker (blank gap already noted as loose).
+        let mut j = i;
+        while j < n && is_blank(&lines[j].s) {
+            j += 1;
+        }
+        let mut k = j;
+        let mut more_terms: Vec<String> = Vec::new();
+        while k < n
+            && !is_blank(&lines[k].s)
+            && !lines[k].lazy
+            && indent_rel(&lines[k]) == 0
+            && is_def_marker(&lines[k]).is_none()
+            && parse_list_marker(&lines[k]).is_none()
+            && parse_atx(&lines[k]).is_none()
+            && is_thematic_break(&lines[k]).is_none()
+            && parse_fence_open(&lines[k]).is_none()
+            && parse_blockquote_marker(&lines[k]).is_none()
+            && html_block_start(&lines[k], false).is_none()
+        {
+            more_terms.push(strip_cols(&lines[k], lines[k].s.len() * 4 + 4).s);
+            k += 1;
+        }
+        if !more_terms.is_empty() && k < n && !lines[k].lazy && is_def_marker(&lines[k]).is_some() {
+            if j > i || gap_pending {
+                loose = true;
+            }
+            gap_pending = false;
+            terms = more_terms;
+            i = k;
+            continue;
+        }
+        // Any blank gap before a non-term line still loosens only when the
+        // list already holds several items with blanks between (handled
+        // above); trailing blanks stay unconsumed for the outer loop.
+        break;
+    }
+
+    (
+        Block::DefinitionList {
+            tight: !loose,
+            items,
+        },
+        i,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn render_blocks(blocks: &[Block], refs: &RefDefs, out: &mut String) {
-    render_blocks_opts(blocks, refs, false, out);
+    render_blocks_opts(
+        blocks,
+        refs,
+        &FootnoteMap::default(),
+        false,
+        &mut FootnoteState::default(),
+        out,
+    );
 }
 
-fn render_blocks_opts(blocks: &[Block], refs: &RefDefs, gfm: bool, out: &mut String) {
+fn render_blocks_opts(
+    blocks: &[Block],
+    refs: &RefDefs,
+    foot: &FootnoteMap,
+    gfm: bool,
+    fs: &mut FootnoteState,
+    out: &mut String,
+) {
     for b in blocks {
-        render_block_opts(b, refs, gfm, out);
+        render_block_opts(b, refs, foot, gfm, fs, out);
     }
 }
 
 #[allow(dead_code)]
 fn render_inline_text(s: &str, refs: &RefDefs) -> String {
-    render_inline_text_opts(s, refs, false)
+    render_inline_text_opts(
+        s,
+        refs,
+        &FootnoteMap::default(),
+        false,
+        &mut FootnoteState::default(),
+    )
 }
 
-fn render_inline_text_opts(s: &str, refs: &RefDefs, gfm: bool) -> String {
+fn render_inline_text_opts(
+    s: &str,
+    refs: &RefDefs,
+    foot: &FootnoteMap,
+    gfm: bool,
+    fs: &mut FootnoteState,
+) -> String {
     if gfm {
-        render_inline_html(&parse_inline_with_refs_gfm(s, refs))
+        let mut elems = parse_inline_with_refs_gfm(s, refs);
+        if !foot.is_empty() {
+            crate::inline_parser::resolve_footnote_refs(&mut elems, foot, fs);
+        }
+        render_inline_html(&elems)
     } else {
         render_inline_html(&parse_inline_with_refs(s, refs))
     }
@@ -1868,15 +2238,29 @@ pub(crate) fn clean_info_word(info: &str) -> String {
 
 #[allow(dead_code)]
 fn render_block(b: &Block, refs: &RefDefs, out: &mut String) {
-    render_block_opts(b, refs, false, out);
+    render_block_opts(
+        b,
+        refs,
+        &FootnoteMap::default(),
+        false,
+        &mut FootnoteState::default(),
+        out,
+    );
 }
 
-fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
+fn render_block_opts(
+    b: &Block,
+    refs: &RefDefs,
+    foot: &FootnoteMap,
+    gfm: bool,
+    fs: &mut FootnoteState,
+    out: &mut String,
+) {
     match b {
         Block::Paragraph(lines) => {
             let text = lines.join("\n");
             out.push_str("<p>");
-            out.push_str(&render_inline_text_opts(&text, refs, gfm));
+            out.push_str(&render_inline_text_opts(&text, refs, foot, gfm, fs));
             out.push_str("</p>\n");
         }
         Block::Heading {
@@ -1885,7 +2269,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             kind: _,
         } => {
             out.push_str(&format!("<h{}>", level));
-            out.push_str(&render_inline_text_opts(content, refs, gfm));
+            out.push_str(&render_inline_text_opts(content, refs, foot, gfm, fs));
             out.push_str(&format!("</h{}>\n", level));
         }
         Block::ThematicBreak(_) => {
@@ -1930,7 +2314,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
         }
         Block::BlockQuote(children) => {
             out.push_str("<blockquote>\n");
-            render_blocks_opts(children, refs, gfm, out);
+            render_blocks_opts(children, refs, foot, gfm, fs, out);
             out.push_str("</blockquote>\n");
         }
         Block::List {
@@ -1940,7 +2324,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             items,
             ..
         } => {
-            render_list(ordered, start, tight, items, refs, gfm, out);
+            render_list(ordered, start, tight, items, refs, foot, gfm, fs, out);
         }
         Block::Table {
             header,
@@ -1952,7 +2336,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
                 out.push_str("<th");
                 append_alignment(out, alignments.get(k).copied().unwrap_or(Alignment::None));
                 out.push('>');
-                out.push_str(&render_inline_text_opts(cell, refs, gfm));
+                out.push_str(&render_inline_text_opts(cell, refs, foot, gfm, fs));
                 out.push_str("</th>\n");
             }
             out.push_str("</tr>\n</thead>\n");
@@ -1967,7 +2351,7 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
                             alignments.get(k).copied().unwrap_or(Alignment::None),
                         );
                         out.push('>');
-                        out.push_str(&render_inline_text_opts(cell, refs, gfm));
+                        out.push_str(&render_inline_text_opts(cell, refs, foot, gfm, fs));
                         out.push_str("</td>\n");
                     }
                     out.push_str("</tr>\n");
@@ -1976,20 +2360,77 @@ fn render_block_opts(b: &Block, refs: &RefDefs, gfm: bool, out: &mut String) {
             }
             out.push_str("</table>\n");
         }
+        Block::DefinitionList { tight, items } => {
+            render_deflist(tight, items, refs, foot, gfm, fs, out);
+        }
     }
+}
+
+/// Render a definition list (`<dl>` with `<dt>` terms and `<dd>`
+/// descriptions). Tight single-paragraph descriptions unwrap `<p>`,
+/// mirroring tight list items; loose descriptions render as blocks.
+fn render_deflist(
+    tight: &bool,
+    items: &[DefListItem],
+    refs: &RefDefs,
+    foot: &FootnoteMap,
+    gfm: bool,
+    fs: &mut FootnoteState,
+    out: &mut String,
+) {
+    out.push_str("<dl>\n");
+    for item in items {
+        for term in &item.terms {
+            out.push_str("<dt>");
+            out.push_str(&render_inline_text_opts(term, refs, foot, gfm, fs));
+            out.push_str("</dt>\n");
+        }
+        for desc in &item.descriptions {
+            let single_para = desc.len() == 1 && matches!(desc.first(), Some(Block::Paragraph(_)));
+            if *tight && single_para {
+                if let Some(Block::Paragraph(lines)) = desc.first() {
+                    out.push_str("<dd>");
+                    out.push_str(&render_inline_text_opts(
+                        &lines.join("\n"),
+                        refs,
+                        foot,
+                        gfm,
+                        fs,
+                    ));
+                    out.push_str("</dd>\n");
+                    continue;
+                }
+            }
+            if desc.is_empty() {
+                out.push_str("<dd></dd>\n");
+                continue;
+            }
+            out.push_str("<dd>\n");
+            render_blocks_opts(desc, refs, foot, gfm, fs, out);
+            out.push_str("</dd>\n");
+        }
+    }
+    out.push_str("</dl>\n");
 }
 
 /// Render a list, applying the GFM task-list extension when `gfm` is set:
 /// a list item whose first block is a paragraph starting with `[ ]` /
 /// `[x]`/`[X]` renders a disabled checkbox and the remainder text. Tables
 /// are intentionally NOT gated (always-on GFM exception, spec-neutral).
+/// Nine parameters mirror the neighboring render functions: the block plus
+/// the shared render context (references, footnotes, GFM flag, footnote
+/// numbering state, output). A context struct would churn every call site
+/// for no behavioral gain.
+#[allow(clippy::too_many_arguments)]
 fn render_list(
     ordered: &bool,
     start: &u32,
     tight: &bool,
     items: &[Vec<Block>],
     refs: &RefDefs,
+    foot: &FootnoteMap,
     gfm: bool,
+    fs: &mut FootnoteState,
     out: &mut String,
 ) {
     if *ordered {
@@ -2030,7 +2471,8 @@ fn render_list(
             for (k, b) in item_view.iter().enumerate() {
                 match b {
                     Block::Paragraph(lines) => {
-                        let inline = render_inline_text_opts(&lines.join("\n"), refs, gfm);
+                        let inline =
+                            render_inline_text_opts(&lines.join("\n"), refs, foot, gfm, fs);
                         if k > 0 && !out.ends_with('\n') {
                             out.push('\n');
                         }
@@ -2044,7 +2486,7 @@ fn render_list(
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
-                        render_block_opts(b, refs, gfm, out);
+                        render_block_opts(b, refs, foot, gfm, fs, out);
                     }
                 }
             }
@@ -2075,10 +2517,16 @@ fn render_list(
                         rendered_first = true;
                         out.push_str("<p>");
                         out.push_str(checkbox);
-                        out.push_str(&render_inline_text_opts(&lines.join("\n"), refs, gfm));
+                        out.push_str(&render_inline_text_opts(
+                            &lines.join("\n"),
+                            refs,
+                            foot,
+                            gfm,
+                            fs,
+                        ));
                         out.push_str("</p>\n");
                     }
-                    _ => render_block_opts(b, refs, gfm, out),
+                    _ => render_block_opts(b, refs, foot, gfm, fs, out),
                 }
             }
             out.push_str("</li>\n");
@@ -2089,6 +2537,79 @@ fn render_list(
     } else {
         out.push_str("</ul>\n");
     }
+}
+
+/// Render the collected footnotes as a GFM footer section, in first-reference
+/// order (cmark-gfm shape: `<section class="footnotes" data-footnotes>` with
+/// an `<ol>` of `<li id="fn-N">`). Unreferenced definitions are dropped from
+/// HTML (they survive in Markdown round-trips). Repeat references share the
+/// footnote number but every reference—and every backlink—carries a unique
+/// anchor (`fnref-N` for the first, `fnref-N-K` after).
+fn render_footnote_section(
+    foot: &FootnoteMap,
+    refs: &RefDefs,
+    gfm: bool,
+    fs: &mut FootnoteState,
+    out: &mut String,
+) {
+    if fs.order.is_empty() {
+        return;
+    }
+    out.push_str("<section class=\"footnotes\" data-footnotes>\n<ol>\n");
+    // New references may surface inside footnote content itself; drain the
+    // order list by index so they still get their own entries.
+    let mut idx = 0usize;
+    while idx < fs.order.len() {
+        let label = fs.order[idx].clone();
+        idx += 1;
+        let content = match foot.contents.get(&label) {
+            Some(c) => c.clone(),
+            None => continue,
+        };
+        // `mark` appends labels in first-reference order and never removes,
+        // so the 1-based position is the footnote number.
+        let n = idx;
+        out.push_str(&format!("<li id=\"fn-{}\">\n", n));
+        // Backlinks: one per recorded reference (totals so far; body refs
+        // always precede the footer, so repeat counts are complete here).
+        let total = fs.counts.get(&label).copied().unwrap_or(1).max(1);
+        let mut backs = String::new();
+        for k in 1..=total {
+            let href = if k == 1 {
+                format!("#fnref-{}", n)
+            } else {
+                format!("#fnref-{}-{}", n, k)
+            };
+            let text = if k == 1 {
+                "↩".to_string()
+            } else {
+                format!("↩<sup>{}</sup>", k)
+            };
+            backs.push_str(&format!(
+                " <a href=\"{}\" class=\"footnote-backref\" data-footnote-backref aria-label=\"Back to reference {}\">{}</a>",
+                href, n, text
+            ));
+        }
+        // The backlinks join the last paragraph when there is one (cmark-gfm
+        // shape); otherwise they form their own paragraph.
+        let mut rendered = String::new();
+        render_blocks_opts(&content, refs, foot, gfm, fs, &mut rendered);
+        let ends_para =
+            matches!(content.last(), Some(Block::Paragraph(_))) && rendered.ends_with("</p>\n");
+        if ends_para {
+            rendered.truncate(rendered.len() - "</p>\n".len());
+            rendered.push_str(&backs);
+            rendered.push_str("</p>\n");
+        } else {
+            if !rendered.is_empty() && !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str(&format!("<p>{}</p>\n", backs.trim_start()));
+        }
+        out.push_str(&rendered);
+        out.push_str("</li>\n");
+    }
+    out.push_str("</ol>\n</section>\n");
 }
 
 /// Append a GFM ` align="…"` attribute for a column alignment.
@@ -2105,9 +2626,13 @@ pub(crate) fn append_alignment(out: &mut String, a: Alignment) {
 /// Conversion options for Markdown → HTML.
 ///
 /// `gfm: false` (the default) is pure CommonMark 0.31.2: `~~`, task-list
-/// brackets and bare `http(s)://`/`www.`/emails stay literal. `gfm: true`
-/// additionally enables task-list checkboxes, `~~` strikethrough (`<del>`)
-/// and bare autolinks.
+/// brackets, bare `http(s)://`/`www.`/emails, `[^…]` footnote markers and
+/// `:` definition markers stay literal. `gfm: true` additionally enables
+/// task-list checkboxes, `~~` strikethrough (`<del>`), bare autolinks,
+/// footnotes (`[^label]` references plus `[^label]:` definitions rendered
+/// as a `<section class="footnotes" data-footnotes>` footer) and PHP
+/// Markdown Extra-style definition lists (`Term` + `: description` as
+/// `<dl>`).
 ///
 /// Tables are the one always-on GFM exception and render in both modes
 /// (the CommonMark spec has no pipe-table tests, so compliance is
@@ -2157,9 +2682,13 @@ pub fn convert_with(input: &str, options: Options) -> Result<String> {
     // or without the `frontmatter` cargo feature) so a fenced document
     // converts exactly like its body alone.
     let body = crate::frontmatter::strip_frontmatter_body(input);
-    let (blocks, refs) = parse_document_blocks(body);
+    let (blocks, refs, foot) = parse_document_blocks_opts(body, options.gfm);
     let mut out = String::new();
-    render_blocks_opts(&blocks, &refs, options.gfm, &mut out);
+    let mut fs = FootnoteState::default();
+    render_blocks_opts(&blocks, &refs, &foot, options.gfm, &mut fs, &mut out);
+    if options.gfm {
+        render_footnote_section(&foot, &refs, options.gfm, &mut fs, &mut out);
+    }
     Ok(out)
 }
 
@@ -2172,7 +2701,17 @@ pub fn convert_with(input: &str, options: Options) -> Result<String> {
 /// the second builds the tree with the complete map. Refdef extraction is
 /// order-independent (first definition wins), so structure is identical in
 /// both passes.
-pub(crate) fn parse_document_blocks(input: &str) -> (Vec<Block>, RefDefs) {
+///
+/// GFM footnote definitions ride the same two-pass scheme (top-level only,
+/// first definition wins): pass 1 collects refdefs over the raw lines, the
+/// raw footnote ranges are then lifted out, and pass 2 builds the tree plus
+/// each footnote's content blocks with the complete refdef map. With
+/// `gfm: false` no footnote line is recognized and the result is identical
+/// to the historical two-pass parse.
+pub(crate) fn parse_document_blocks_opts(
+    input: &str,
+    gfm: bool,
+) -> (Vec<Block>, RefDefs, FootnoteMap) {
     // Split into lines (strip \r; keep tabs verbatim for tab-stop logic).
     let raw: Vec<String> = input
         .replace("\r\n", "\n")
@@ -2186,14 +2725,69 @@ pub(crate) fn parse_document_blocks(input: &str) -> (Vec<Block>, RefDefs) {
         raw.pop();
     }
     let lines: Vec<PLine> = raw.into_iter().map(PLine::fresh).collect();
+    // Lift footnote definition ranges (GFM only) before either pass, so a
+    // `[^m]: …` line never doubles as a link reference definition.
+    let mut fraw_order: Vec<String> = Vec::new();
+    let mut fraw: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut skip: Vec<(usize, usize)> = Vec::new();
+    if gfm {
+        let mut i = 0usize;
+        while i < lines.len() {
+            if is_blank(&lines[i].s) {
+                i += 1;
+                continue;
+            }
+            match try_footnote_def(&lines, i) {
+                Some(raw_def) => {
+                    skip.push((i, raw_def.consumed));
+                    i += raw_def.consumed.max(1);
+                    // First definition wins; later duplicates are consumed
+                    // and dropped (mirroring link refdefs).
+                    if let std::collections::hash_map::Entry::Vacant(e) = fraw.entry(raw_def.label)
+                    {
+                        fraw_order.push(e.key().clone());
+                        e.insert(raw_def.content);
+                    }
+                }
+                None => i += 1,
+            }
+        }
+    }
+    let lines2: Vec<PLine> = if skip.is_empty() {
+        lines
+    } else {
+        let mut out: Vec<PLine> = Vec::with_capacity(lines.len());
+        let mut i = 0usize;
+        let mut s = 0usize;
+        while i < lines.len() {
+            if s < skip.len() && i == skip[s].0 {
+                i += skip[s].1.max(1);
+                s += 1;
+            } else {
+                out.push(lines[i].clone());
+                i += 1;
+            }
+        }
+        out
+    };
     let mut refs: RefDefs = RefDefs::new();
-    let _ = parse_blocks(&lines, &mut refs);
-    let blocks = parse_blocks(&lines, &mut refs);
-    (blocks, refs)
+    let _ = parse_blocks(&lines2, &mut refs, gfm);
+    let blocks = parse_blocks(&lines2, &mut refs, gfm);
+    // Footnote content blocks, parsed with the complete refdef map.
+    let mut foot = FootnoteMap::default();
+    for label in fraw_order {
+        let content = fraw.remove(&label).unwrap_or_default();
+        let clines: Vec<PLine> = content.into_iter().map(PLine::fresh).collect();
+        let cblocks = parse_blocks(&clines, &mut refs, gfm);
+        foot.order.push(label.clone());
+        foot.contents.insert(label, cblocks);
+    }
+    (blocks, refs, foot)
 }
 
 /// Convert Markdown to HTML with GFM extensions enabled (task lists,
-/// strikethrough, bare autolinks; tables render in both modes).
+/// strikethrough, bare autolinks, footnotes, definition lists; tables
+/// render in both modes).
 ///
 /// # Examples
 ///

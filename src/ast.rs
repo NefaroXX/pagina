@@ -4,9 +4,10 @@
 //! nodes — all `String`s, hence `Send + Sync`) covering the syntax this
 //! crate parses today: paragraphs, ATX + setext headings, blockquotes,
 //! tight/loose lists with task markers, indented + fenced code, thematic
-//! breaks, GFM pipe tables with alignments, verbatim HTML blocks, a
-//! frontmatter attachment point, and the collected link reference
-//! definitions.
+//! breaks, GFM pipe tables with alignments, GFM footnotes (references plus
+//! hoisted definitions), GFM definition lists (terms + descriptions),
+//! verbatim HTML blocks, a frontmatter attachment point, and the collected
+//! link reference definitions.
 //!
 //! Lossless-leaning, not lossless: delimiter characters (`*` vs `_`),
 //! link reference styles (inline / reference / collapsed / shortcut),
@@ -28,7 +29,7 @@ use crate::frontmatter::Frontmatter;
 use crate::html_escape::{clean_url, escape_href, escape_html};
 use crate::inline_parser::RefDefs;
 use crate::markdown_to_html::{
-    append_alignment, clean_info_word, parse_document_blocks, strip_task_prefix, task_checkbox,
+    append_alignment, clean_info_word, parse_document_blocks_opts, strip_task_prefix, task_checkbox,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,15 @@ pub enum Block {
     List(List),
     /// GFM pipe table (large variant: boxed).
     Table(Box<Table>),
+    /// GFM footnote definition. Definitions are hoisted out of flow by
+    /// [`parse`] and appended after the body in first-reference order, so
+    /// [`render_html`] can emit the `<section class="footnotes">` footer;
+    /// in-flow occurrences (hand-built documents) are skipped by
+    /// [`render_html`] and hoisted the same way when top-level.
+    /// (Large variant: boxed.)
+    FootnoteDefinition(Box<FootnoteDefinition>),
+    /// PHP Markdown Extra-style definition list (GFM-gated).
+    DefinitionList(DefinitionList),
 }
 
 /// A heading: level 1-6, inline content, and how it was written.
@@ -196,6 +206,53 @@ pub enum Alignment {
     Right,
 }
 
+/// A GFM footnote definition: `[^label]:` plus its content blocks.
+///
+/// `number` is the 1-based first-reference order (0 when never referenced;
+/// such definitions are dropped from HTML but kept for Markdown
+/// round-trips). Labels match case-sensitively; the first definition wins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FootnoteDefinition {
+    /// Definition label as written (without `[^` / `]`).
+    pub label: String,
+    /// 1-based first-reference order (0 = unreferenced).
+    pub number: usize,
+    /// Content blocks (multi-paragraph and nested blocks allowed).
+    pub blocks: Vec<Block>,
+}
+
+/// A PHP Markdown Extra-style definition list: terms sharing descriptions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionList {
+    /// Tight (single-paragraph descriptions unwrap `<p>`) vs loose.
+    pub tight: bool,
+    /// Entries in order.
+    pub items: Vec<DefinitionListItem>,
+}
+
+/// One definition-list entry: terms sharing one or more descriptions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionListItem {
+    /// Term lines (`<dt>` each).
+    pub terms: Vec<DefinitionTerm>,
+    /// Descriptions (`<dd>` each).
+    pub descriptions: Vec<DefinitionDescription>,
+}
+
+/// One definition-list term: inline content rendered as `<dt>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionTerm {
+    /// Inline content of the term.
+    pub content: Vec<Inline>,
+}
+
+/// One definition-list description: blocks rendered as `<dd>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionDescription {
+    /// Content blocks of the description.
+    pub blocks: Vec<Block>,
+}
+
 // ---------------------------------------------------------------------------
 // Inlines
 // ---------------------------------------------------------------------------
@@ -229,6 +286,9 @@ pub enum Inline {
     Image(Box<Image>),
     /// `<http://…>` / `<a@b.c>` autolinks and GFM bare URLs/emails.
     Autolink(Autolink),
+    /// GFM footnote reference (`[^label]`); `number` is the 1-based
+    /// first-reference order shared with [`FootnoteDefinition`].
+    FootnoteReference(FootnoteReference),
     /// Inline raw HTML, passed through verbatim.
     RawHtml(String),
     /// Two-space / backslash line ending.
@@ -276,6 +336,15 @@ pub struct Image {
     pub style: LinkStyle,
 }
 
+/// A GFM footnote reference: `[^label]` in source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FootnoteReference {
+    /// Reference label as written (without `[^` / `]`).
+    pub label: String,
+    /// 1-based first-reference order (matches the footer entry).
+    pub number: usize,
+}
+
 /// An autolink: `<uri>` / `<email>` (`bare: false`) or a GFM bare
 /// URL/email (`bare: true`). `url` is the href form (`mailto:`-prefixed
 /// for emails); `text` is the visible form.
@@ -296,18 +365,61 @@ pub struct Autolink {
 /// Parse Markdown into a [`Document`] with explicit [`crate::Options`].
 ///
 /// `gfm: false` is pure CommonMark (task brackets stay literal, `~~`
-/// stays literal, bare URLs stay plain); `gfm: true` additionally parses
-/// task-list items, `~~` strikethrough, and bare autolinks. Pipe tables
-/// parse in both modes (spec-neutral always-on exception, as in
+/// stays literal, bare URLs stay plain, `[^…]` and `:` markers stay
+/// literal); `gfm: true` additionally parses task-list items, `~~`
+/// strikethrough, bare autolinks, footnotes, and definition lists. Pipe
+/// tables parse in both modes (spec-neutral always-on exception, as in
 /// [`crate::markdown_to_html::convert`]).
+///
+/// Footnote definitions are hoisted out of flow and appended after the body
+/// in first-reference order (unreferenced definitions follow in definition
+/// order with `number: 0`), mirroring how reference definitions collect
+/// document-wide.
 pub fn parse(input: &str, options: crate::Options) -> Document {
     let (frontmatter, body) = crate::frontmatter::parse_with_frontmatter(input);
-    let (blocks, refs) = parse_document_blocks(body);
+    let (blocks, refs, foot) = parse_document_blocks_opts(body, options.gfm);
     let gfm = options.gfm;
-    let blocks = blocks
+    let defined: std::collections::HashSet<String> = foot.contents.keys().cloned().collect();
+    let mut forder: Vec<String> = Vec::new();
+    let mut blocks: Vec<Block> = blocks
         .iter()
-        .map(|b| convert_block(b, &refs, gfm))
+        .map(|b| convert_block(b, &refs, gfm, &defined, &mut forder))
         .collect();
+    // Hoisted footnote definitions in first-reference order (fixpoint: refs
+    // inside footnote content itself extend the order); unreferenced
+    // definitions follow in definition order with `number: 0`.
+    let mut idx = 0usize;
+    while idx < forder.len() {
+        let label = forder[idx].clone();
+        idx += 1;
+        if let Some(content) = foot.contents.get(&label) {
+            let number = idx;
+            let converted = content
+                .iter()
+                .map(|b| convert_block(b, &refs, gfm, &defined, &mut forder))
+                .collect();
+            blocks.push(Block::FootnoteDefinition(Box::new(FootnoteDefinition {
+                label,
+                number,
+                blocks: converted,
+            })));
+        }
+    }
+    for label in &foot.order {
+        if !forder.contains(label) {
+            if let Some(content) = foot.contents.get(label) {
+                let converted = content
+                    .iter()
+                    .map(|b| convert_block(b, &refs, gfm, &defined, &mut forder))
+                    .collect();
+                blocks.push(Block::FootnoteDefinition(Box::new(FootnoteDefinition {
+                    label: label.clone(),
+                    number: 0,
+                    blocks: converted,
+                })));
+            }
+        }
+    }
     Document {
         blocks,
         references: refs,
@@ -336,6 +448,11 @@ pub fn plain_text(inlines: &[Inline]) -> String {
             Inline::Link(link) => s.push_str(&plain_text(&link.text)),
             Inline::Image(img) => s.push_str(&img.alt),
             Inline::Autolink(a) => s.push_str(&a.text),
+            Inline::FootnoteReference(r) => {
+                s.push_str("[^");
+                s.push_str(&r.label);
+                s.push(']');
+            }
             Inline::RawHtml(h) => s.push_str(h),
             Inline::HardBreak | Inline::SoftBreak => s.push('\n'),
         }
@@ -352,14 +469,32 @@ fn convert_alignment(a: crate::markdown_to_html::Alignment) -> Alignment {
     }
 }
 
-fn parse_inlines(s: &str, refs: &RefDefs, gfm: bool) -> Vec<Inline> {
-    crate::inline_parser::parse_inline_ast(s, refs, gfm)
+fn parse_inlines(
+    s: &str,
+    refs: &RefDefs,
+    gfm: bool,
+    footnotes: &std::collections::HashSet<String>,
+    forder: &mut Vec<String>,
+) -> Vec<Inline> {
+    crate::inline_parser::parse_inline_ast(s, refs, gfm, footnotes, forder)
 }
 
-fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bool) -> Block {
+fn convert_block(
+    block: &crate::markdown_to_html::Block,
+    refs: &RefDefs,
+    gfm: bool,
+    footnotes: &std::collections::HashSet<String>,
+    forder: &mut Vec<String>,
+) -> Block {
     use crate::markdown_to_html::Block as IB;
     match block {
-        IB::Paragraph(lines) => Block::Paragraph(parse_inlines(&lines.join("\n"), refs, gfm)),
+        IB::Paragraph(lines) => Block::Paragraph(parse_inlines(
+            &lines.join("\n"),
+            refs,
+            gfm,
+            footnotes,
+            forder,
+        )),
         IB::Heading {
             level,
             content,
@@ -375,7 +510,7 @@ fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bo
             };
             Block::Heading(Heading {
                 level: *level,
-                content: parse_inlines(content, refs, gfm),
+                content: parse_inlines(content, refs, gfm, footnotes, forder),
                 kind,
             })
         }
@@ -402,7 +537,7 @@ fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bo
         IB::BlockQuote(children) => Block::BlockQuote(
             children
                 .iter()
-                .map(|b| convert_block(b, refs, gfm))
+                .map(|b| convert_block(b, refs, gfm, footnotes, forder))
                 .collect(),
         ),
         IB::List {
@@ -420,7 +555,32 @@ fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bo
             tight: *tight,
             items: items
                 .iter()
-                .map(|item| convert_list_item(item, refs, gfm))
+                .map(|item| convert_list_item(item, refs, gfm, footnotes, forder))
+                .collect(),
+        }),
+        IB::DefinitionList { tight, items } => Block::DefinitionList(DefinitionList {
+            tight: *tight,
+            items: items
+                .iter()
+                .map(|item| DefinitionListItem {
+                    terms: item
+                        .terms
+                        .iter()
+                        .map(|t| DefinitionTerm {
+                            content: parse_inlines(t, refs, gfm, footnotes, forder),
+                        })
+                        .collect(),
+                    descriptions: item
+                        .descriptions
+                        .iter()
+                        .map(|d| DefinitionDescription {
+                            blocks: d
+                                .iter()
+                                .map(|b| convert_block(b, refs, gfm, footnotes, forder))
+                                .collect(),
+                        })
+                        .collect(),
+                })
                 .collect(),
         }),
         IB::Table {
@@ -431,7 +591,7 @@ fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bo
             header: header
                 .iter()
                 .map(|c| TableCell {
-                    content: parse_inlines(c, refs, gfm),
+                    content: parse_inlines(c, refs, gfm, footnotes, forder),
                 })
                 .collect(),
             alignments: alignments.iter().map(|a| convert_alignment(*a)).collect(),
@@ -440,7 +600,7 @@ fn convert_block(block: &crate::markdown_to_html::Block, refs: &RefDefs, gfm: bo
                 .map(|row| {
                     row.iter()
                         .map(|c| TableCell {
-                            content: parse_inlines(c, refs, gfm),
+                            content: parse_inlines(c, refs, gfm, footnotes, forder),
                         })
                         .collect()
                 })
@@ -456,15 +616,20 @@ fn convert_list_item(
     item: &[crate::markdown_to_html::Block],
     refs: &RefDefs,
     gfm: bool,
+    footnotes: &std::collections::HashSet<String>,
+    forder: &mut Vec<String>,
 ) -> ListItem {
     use crate::markdown_to_html::Block as IB;
     let mut task: Option<bool> = None;
-    let mut blocks: Vec<Block> = item.iter().map(|b| convert_block(b, refs, gfm)).collect();
+    let mut blocks: Vec<Block> = item
+        .iter()
+        .map(|b| convert_block(b, refs, gfm, footnotes, forder))
+        .collect();
     if gfm {
         if let Some(IB::Paragraph(lines)) = item.first() {
             if let Some((checked, rest)) = strip_task_prefix(&lines.join("\n")) {
                 task = Some(checked);
-                let rest_inlines = parse_inlines(&rest, refs, gfm);
+                let rest_inlines = parse_inlines(&rest, refs, gfm, footnotes, forder);
                 blocks[0] = Block::Paragraph(rest_inlines);
             }
         }
@@ -484,31 +649,190 @@ fn convert_list_item(
 /// documents parsed with the corresponding options (verified in
 /// `tests/ast.rs`); frontmatter never renders.
 pub fn render_html(doc: &Document) -> String {
+    let mut fr = FootnoteRender::collect(doc);
     let mut out = String::new();
     for block in &doc.blocks {
-        render_block_html(block, &mut out);
+        // Footnote definitions never render in flow; the footer below owns
+        // them (mirrors the legacy `convert_gfm` path exactly).
+        if matches!(block, Block::FootnoteDefinition(_)) {
+            continue;
+        }
+        render_block_html(block, &mut out, &mut fr);
     }
+    render_footnote_footer(doc, &mut fr, &mut out);
     out
 }
 
-fn render_inlines_html(inlines: &[Inline]) -> String {
+/// Footnote render state: precomputed per-label reference totals plus the
+/// occurrences rendered so far (repeat references take `fnref-N-K`).
+struct FootnoteRender {
+    totals: std::collections::HashMap<String, usize>,
+    seen: std::collections::HashMap<String, usize>,
+}
+
+impl FootnoteRender {
+    fn collect(doc: &Document) -> Self {
+        let mut totals: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for block in &doc.blocks {
+            count_footnote_refs_block(block, &mut totals);
+        }
+        FootnoteRender {
+            totals,
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Record one rendered reference; returns its 1-based occurrence index.
+    fn mark(&mut self, label: &str) -> usize {
+        let seen = self.seen.entry(label.to_string()).or_insert(0);
+        *seen += 1;
+        *seen
+    }
+}
+
+fn count_footnote_refs_block(block: &Block, totals: &mut std::collections::HashMap<String, usize>) {
+    match block {
+        Block::Paragraph(inlines) => count_footnote_refs_inlines(inlines, totals),
+        Block::Heading(h) => count_footnote_refs_inlines(&h.content, totals),
+        Block::ThematicBreak(_) | Block::CodeBlock(_) | Block::HtmlBlock(_) => {}
+        Block::BlockQuote(children) => {
+            for child in children {
+                count_footnote_refs_block(child, totals);
+            }
+        }
+        Block::List(list) => {
+            for item in &list.items {
+                for child in &item.blocks {
+                    count_footnote_refs_block(child, totals);
+                }
+            }
+        }
+        Block::Table(table) => {
+            for cell in &table.header {
+                count_footnote_refs_inlines(&cell.content, totals);
+            }
+            for row in &table.rows {
+                for cell in row {
+                    count_footnote_refs_inlines(&cell.content, totals);
+                }
+            }
+        }
+        Block::FootnoteDefinition(def) => {
+            for child in &def.blocks {
+                count_footnote_refs_block(child, totals);
+            }
+        }
+        Block::DefinitionList(dl) => {
+            for item in &dl.items {
+                for term in &item.terms {
+                    count_footnote_refs_inlines(&term.content, totals);
+                }
+                for desc in &item.descriptions {
+                    for child in &desc.blocks {
+                        count_footnote_refs_block(child, totals);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn count_footnote_refs_inlines(
+    inlines: &[Inline],
+    totals: &mut std::collections::HashMap<String, usize>,
+) {
+    for inline in inlines {
+        match inline {
+            Inline::FootnoteReference(r) => {
+                *totals.entry(r.label.clone()).or_insert(0) += 1;
+            }
+            Inline::Emphasis { content, .. }
+            | Inline::Strong { content, .. }
+            | Inline::Strikethrough(content) => count_footnote_refs_inlines(content, totals),
+            Inline::Link(link) => count_footnote_refs_inlines(&link.text, totals),
+            _ => {}
+        }
+    }
+}
+
+/// Render the footnote footer (`<section class="footnotes" data-footnotes>`)
+/// from top-level [`Block::FootnoteDefinition`] nodes, in document order
+/// (which [`parse`] already arranged as first-reference order). Definitions
+/// without references are dropped from HTML.
+fn render_footnote_footer(doc: &Document, fr: &mut FootnoteRender, out: &mut String) {
+    let defs: Vec<&FootnoteDefinition> = doc
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::FootnoteDefinition(def) => Some(def.as_ref()),
+            _ => None,
+        })
+        .filter(|def| fr.totals.get(&def.label).copied().unwrap_or(0) > 0)
+        .collect();
+    if defs.is_empty() {
+        return;
+    }
+    out.push_str("<section class=\"footnotes\" data-footnotes>\n<ol>\n");
+    for def in defs {
+        out.push_str(&format!("<li id=\"fn-{}\">\n", def.number));
+        let total = fr.totals.get(&def.label).copied().unwrap_or(1).max(1);
+        let mut backs = String::new();
+        for k in 1..=total {
+            let href = if k == 1 {
+                format!("#fnref-{}", def.number)
+            } else {
+                format!("#fnref-{}-{}", def.number, k)
+            };
+            let text = if k == 1 {
+                "↩".to_string()
+            } else {
+                format!("↩<sup>{}</sup>", k)
+            };
+            backs.push_str(&format!(
+                " <a href=\"{}\" class=\"footnote-backref\" data-footnote-backref aria-label=\"Back to reference {}\">{}</a>",
+                href, def.number, text
+            ));
+        }
+        let mut rendered = String::new();
+        for child in &def.blocks {
+            render_block_html(child, &mut rendered, fr);
+        }
+        let ends_para =
+            matches!(def.blocks.last(), Some(Block::Paragraph(_))) && rendered.ends_with("</p>\n");
+        if ends_para {
+            rendered.truncate(rendered.len() - "</p>\n".len());
+            rendered.push_str(&backs);
+            rendered.push_str("</p>\n");
+        } else {
+            if !rendered.is_empty() && !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str(&format!("<p>{}</p>\n", backs.trim_start()));
+        }
+        out.push_str(&rendered);
+        out.push_str("</li>\n");
+    }
+    out.push_str("</ol>\n</section>\n");
+}
+
+fn render_inlines_html(inlines: &[Inline], fr: &mut FootnoteRender) -> String {
     let mut out = String::new();
     for inline in inlines {
         match inline {
             Inline::Text(s) => out.push_str(&escape_html(s)),
             Inline::Emphasis { content, .. } => {
                 out.push_str("<em>");
-                out.push_str(&render_inlines_html(content));
+                out.push_str(&render_inlines_html(content, fr));
                 out.push_str("</em>");
             }
             Inline::Strong { content, .. } => {
                 out.push_str("<strong>");
-                out.push_str(&render_inlines_html(content));
+                out.push_str(&render_inlines_html(content, fr));
                 out.push_str("</strong>");
             }
             Inline::Strikethrough(content) => {
                 out.push_str("<del>");
-                out.push_str(&render_inlines_html(content));
+                out.push_str(&render_inlines_html(content, fr));
                 out.push_str("</del>");
             }
             Inline::Code(s) => {
@@ -516,10 +840,18 @@ fn render_inlines_html(inlines: &[Inline]) -> String {
                 out.push_str(&escape_html(s));
                 out.push_str("</code>");
             }
-            Inline::Link(link) => render_link_html(&link.text, &link.url, &link.title, &mut out),
+            Inline::Link(link) => {
+                render_link_html(&link.text, &link.url, &link.title, &mut out, fr)
+            }
             Inline::Image(img) => render_image_html(img, &mut out),
             Inline::Autolink(a) => {
-                render_link_html(&[Inline::Text(a.text.clone())], &a.url, &None, &mut out)
+                render_link_html(&[Inline::Text(a.text.clone())], &a.url, &None, &mut out, fr)
+            }
+            Inline::FootnoteReference(r) => {
+                let occurrence = fr.mark(&r.label);
+                out.push_str(&crate::inline_parser::footnote_ref_html(
+                    &r.label, r.number, occurrence,
+                ));
             }
             Inline::RawHtml(s) => out.push_str(s),
             Inline::HardBreak => out.push_str("<br />\n"),
@@ -529,8 +861,14 @@ fn render_inlines_html(inlines: &[Inline]) -> String {
     out
 }
 
-fn render_link_html(text: &[Inline], url: &str, title: &Option<String>, out: &mut String) {
-    let inner = render_inlines_html(text);
+fn render_link_html(
+    text: &[Inline],
+    url: &str,
+    title: &Option<String>,
+    out: &mut String,
+    fr: &mut FootnoteRender,
+) {
+    let inner = render_inlines_html(text, fr);
     match title {
         Some(t) if !t.is_empty() => {
             out.push_str(&format!(
@@ -570,16 +908,16 @@ fn render_image_html(img: &Image, out: &mut String) {
     }
 }
 
-fn render_block_html(block: &Block, out: &mut String) {
+fn render_block_html(block: &Block, out: &mut String, fr: &mut FootnoteRender) {
     match block {
         Block::Paragraph(inlines) => {
             out.push_str("<p>");
-            out.push_str(&render_inlines_html(inlines));
+            out.push_str(&render_inlines_html(inlines, fr));
             out.push_str("</p>\n");
         }
         Block::Heading(heading) => {
             out.push_str(&format!("<h{}>", heading.level));
-            out.push_str(&render_inlines_html(&heading.content));
+            out.push_str(&render_inlines_html(&heading.content, fr));
             out.push_str(&format!("</h{}>\n", heading.level));
         }
         Block::ThematicBreak(_) => {
@@ -595,13 +933,51 @@ fn render_block_html(block: &Block, out: &mut String) {
         Block::BlockQuote(children) => {
             out.push_str("<blockquote>\n");
             for child in children {
-                render_block_html(child, out);
+                render_block_html(child, out, fr);
             }
             out.push_str("</blockquote>\n");
         }
-        Block::List(list) => render_list_html(list, out),
-        Block::Table(table) => render_table_html(table, out),
+        Block::List(list) => render_list_html(list, out, fr),
+        Block::Table(table) => render_table_html(table, out, fr),
+        // Hoisted: the footer owns definitions (see `render_footnote_footer`).
+        Block::FootnoteDefinition(_) => {}
+        Block::DefinitionList(list) => render_deflist_html(list, out, fr),
     }
+}
+
+/// Definition-list rendering, mirroring the legacy renderer: `<dl>` with
+/// `<dt>` terms; tight single-paragraph descriptions unwrap `<p>`.
+fn render_deflist_html(list: &DefinitionList, out: &mut String, fr: &mut FootnoteRender) {
+    out.push_str("<dl>\n");
+    for item in &list.items {
+        for term in &item.terms {
+            out.push_str("<dt>");
+            out.push_str(&render_inlines_html(&term.content, fr));
+            out.push_str("</dt>\n");
+        }
+        for desc in &item.descriptions {
+            let single_para =
+                desc.blocks.len() == 1 && matches!(desc.blocks.first(), Some(Block::Paragraph(_)));
+            if list.tight && single_para {
+                if let Some(Block::Paragraph(inlines)) = desc.blocks.first() {
+                    out.push_str("<dd>");
+                    out.push_str(&render_inlines_html(inlines, fr));
+                    out.push_str("</dd>\n");
+                    continue;
+                }
+            }
+            if desc.blocks.is_empty() {
+                out.push_str("<dd></dd>\n");
+                continue;
+            }
+            out.push_str("<dd>\n");
+            for child in &desc.blocks {
+                render_block_html(child, out, fr);
+            }
+            out.push_str("</dd>\n");
+        }
+    }
+    out.push_str("</dl>\n");
 }
 
 fn render_code_html(code: &CodeBlock, out: &mut String) {
@@ -639,7 +1015,7 @@ fn push_code_lines(lines: &[String], out: &mut String) {
 /// List rendering, mirroring the legacy renderer line-for-line except that
 /// the task split happened at [`parse`] time (`item.task` + pre-stripped
 /// first paragraph) instead of at render time.
-fn render_list_html(list: &List, out: &mut String) {
+fn render_list_html(list: &List, out: &mut String, fr: &mut FootnoteRender) {
     if list.ordered {
         if list.start != 1 {
             out.push_str(&format!("<ol start=\"{}\">\n", list.start));
@@ -657,7 +1033,7 @@ fn render_list_html(list: &List, out: &mut String) {
             for (k, block) in item.blocks.iter().enumerate() {
                 match block {
                     Block::Paragraph(inlines) => {
-                        let inline = render_inlines_html(inlines);
+                        let inline = render_inlines_html(inlines, fr);
                         if k > 0 && !out.ends_with('\n') {
                             out.push('\n');
                         }
@@ -671,7 +1047,7 @@ fn render_list_html(list: &List, out: &mut String) {
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
-                        render_block_html(block, out);
+                        render_block_html(block, out, fr);
                     }
                 }
             }
@@ -699,10 +1075,10 @@ fn render_list_html(list: &List, out: &mut String) {
                         rendered_first = true;
                         out.push_str("<p>");
                         out.push_str(checkbox);
-                        out.push_str(&render_inlines_html(inlines));
+                        out.push_str(&render_inlines_html(inlines, fr));
                         out.push_str("</p>\n");
                     }
-                    _ => render_block_html(block, out),
+                    _ => render_block_html(block, out, fr),
                 }
             }
             out.push_str("</li>\n");
@@ -715,7 +1091,7 @@ fn render_list_html(list: &List, out: &mut String) {
     }
 }
 
-fn render_table_html(table: &Table, out: &mut String) {
+fn render_table_html(table: &Table, out: &mut String, fr: &mut FootnoteRender) {
     out.push_str("<table>\n<thead>\n<tr>\n");
     for (k, cell) in table.header.iter().enumerate() {
         out.push_str("<th");
@@ -724,7 +1100,7 @@ fn render_table_html(table: &Table, out: &mut String) {
             convert_alignment_back(table.alignments.get(k).copied().unwrap_or(Alignment::None)),
         );
         out.push('>');
-        out.push_str(&render_inlines_html(&cell.content));
+        out.push_str(&render_inlines_html(&cell.content, fr));
         out.push_str("</th>\n");
     }
     out.push_str("</tr>\n</thead>\n");
@@ -741,7 +1117,7 @@ fn render_table_html(table: &Table, out: &mut String) {
                     ),
                 );
                 out.push('>');
-                out.push_str(&render_inlines_html(&cell.content));
+                out.push_str(&render_inlines_html(&cell.content, fr));
                 out.push_str("</td>\n");
             }
             out.push_str("</tr>\n");
@@ -772,13 +1148,17 @@ fn convert_alignment_back(a: Alignment) -> crate::markdown_to_html::Alignment {
 /// demands it. Frontmatter re-emits verbatim ahead of the body (re-attach
 /// via [`crate::frontmatter::prepend_frontmatter`] gives the same bytes).
 /// Collected reference definitions re-emit (sorted by label) after the
-/// body so link styles keep resolving. Output is stable: rendering the
+/// body so link styles keep resolving. Footnote definitions re-emit in
+/// document order (first-reference order, as [`parse`] arranges) between
+/// the body and the reference definitions. Output is stable: rendering the
 /// re-parsed output yields the same text.
 ///
 /// Known rounding limits (shared with the legacy Markdown emitter):
 /// literal text that happens to read as markup (e.g. from backslash
 /// escapes), and titles carrying `"` characters, may not re-parse to the
-/// same nodes.
+/// same nodes. Footnote/definition bodies holding fenced code or raw HTML
+/// blocks also re-emit at zero indent and may not re-parse into the same
+/// definition (they need an indent the fence grammar forbids).
 pub fn render_markdown(doc: &Document) -> String {
     let mut out = String::new();
     if let Some(fm) = &doc.frontmatter {
@@ -789,9 +1169,30 @@ pub fn render_markdown(doc: &Document) -> String {
             "\n"
         });
     }
-    out.push_str(&render_blocks_markdown(&doc.blocks));
+    let (body, fdef_blocks): (Vec<&Block>, Vec<&Block>) = doc
+        .blocks
+        .iter()
+        .partition(|b| !matches!(b, Block::FootnoteDefinition(_)));
+    let body_blocks: Vec<Block> = body.into_iter().cloned().collect();
+    let fdefs: Vec<&FootnoteDefinition> = fdef_blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::FootnoteDefinition(def) => Some(def.as_ref()),
+            _ => None,
+        })
+        .collect();
+    out.push_str(&render_blocks_markdown(&body_blocks));
+    if !fdefs.is_empty() {
+        if !body_blocks.is_empty() {
+            out.push('\n');
+        }
+        for def in fdefs {
+            out.push_str(&render_footnote_definition_markdown(def));
+            out.push('\n');
+        }
+    }
     if !doc.references.is_empty() {
-        if !doc.blocks.is_empty() {
+        if !body_blocks.is_empty() || !fdef_blocks.is_empty() {
             out.push('\n');
         }
         let mut labels: Vec<&String> = doc.references.keys().collect();
@@ -803,6 +1204,71 @@ pub fn render_markdown(doc: &Document) -> String {
         }
     }
     out
+}
+
+/// Render one footnote definition (`[^label]: …`) so it re-parses: a single
+/// paragraph rides on the marker line (soft-wrapped lines indented by 4 to
+/// stay inside the definition); further blocks follow after a blank line,
+/// indented by 4 (fenced code / raw HTML excepted — see the rounding note
+/// on [`render_markdown`]).
+fn render_footnote_definition_markdown(def: &FootnoteDefinition) -> String {
+    let head = format!("[^{}]:", def.label);
+    if def.blocks.is_empty() {
+        return head;
+    }
+    if def.blocks.len() == 1 {
+        if let Some(Block::Paragraph(inlines)) = def.blocks.first() {
+            let first = indent_continuations(&render_inlines_markdown(inlines));
+            return format!("{} {}", head, first);
+        }
+    }
+    let mut out = head;
+    let mut first = true;
+    for block in &def.blocks {
+        if first && matches!(block, Block::Paragraph(_)) {
+            if let Block::Paragraph(inlines) = block {
+                out.push(' ');
+                out.push_str(&indent_continuations(&render_inlines_markdown(inlines)));
+            }
+            first = false;
+            continue;
+        }
+        first = false;
+        out.push('\n');
+        out.push('\n');
+        out.push_str(&indent_block_lines(&render_block_markdown(block)));
+    }
+    out
+}
+
+/// Indent soft-wrapped continuation lines by 4 columns so they stay inside
+/// the current definition/description body on re-parse.
+fn indent_continuations(s: &str) -> String {
+    let mut lines = s.split('\n');
+    let first = lines.next().unwrap_or("").to_string();
+    let mut out = first;
+    for line in lines {
+        out.push('\n');
+        if !line.is_empty() {
+            out.push_str("    ");
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Indent every non-blank line of a rendered block by 4 columns.
+fn indent_block_lines(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("    {}", line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Format one reference definition so it re-parses: `[label]: dest
@@ -852,7 +1318,61 @@ fn render_block_markdown(block: &Block) -> String {
         Block::BlockQuote(children) => render_quote_markdown(children),
         Block::List(list) => render_list_markdown(list),
         Block::Table(table) => render_table_markdown(table),
+        Block::FootnoteDefinition(def) => render_footnote_definition_markdown(def),
+        Block::DefinitionList(list) => render_deflist_markdown(list),
     }
+}
+
+/// Render a definition list: term lines plus `: description` markers.
+/// Single-paragraph descriptions ride on the marker (continuations
+/// indented); further blocks follow blank + indented, mirroring footnote
+/// definitions so output re-parses.
+fn render_deflist_markdown(list: &DefinitionList) -> String {
+    let mut out = String::new();
+    for item in &list.items {
+        for term in &item.terms {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&render_inlines_markdown(&term.content));
+        }
+        for desc in &item.descriptions {
+            if desc.blocks.is_empty() {
+                out.push('\n');
+                out.push(':');
+                continue;
+            }
+            if desc.blocks.len() == 1 {
+                if let Some(Block::Paragraph(inlines)) = desc.blocks.first() {
+                    out.push('\n');
+                    out.push_str(&format!(
+                        ": {}",
+                        indent_continuations(&render_inlines_markdown(inlines))
+                    ));
+                    continue;
+                }
+            }
+            let mut first = true;
+            for block in &desc.blocks {
+                if first && matches!(block, Block::Paragraph(_)) {
+                    if let Block::Paragraph(inlines) = block {
+                        out.push('\n');
+                        out.push_str(&format!(
+                            ": {}",
+                            indent_continuations(&render_inlines_markdown(inlines))
+                        ));
+                    }
+                    first = false;
+                    continue;
+                }
+                first = false;
+                out.push('\n');
+                out.push('\n');
+                out.push_str(&indent_block_lines(&render_block_markdown(block)));
+            }
+        }
+    }
+    out
 }
 
 fn render_inlines_markdown(inlines: &[Inline]) -> String {
@@ -923,6 +1443,9 @@ fn render_inlines_markdown(inlines: &[Inline]) -> String {
                     out.push_str(&a.text);
                     out.push('>');
                 }
+            }
+            Inline::FootnoteReference(r) => {
+                out.push_str(&format!("[^{}]", r.label));
             }
             Inline::RawHtml(s) => out.push_str(s),
             Inline::HardBreak => out.push_str("  \n"),

@@ -15,7 +15,8 @@ pub mod wasm;
 /// Conversion options shared by both directions.
 ///
 /// Pure CommonMark is the default (`gfm: false`); set `gfm: true` for the
-/// opt-in GFM extensions (task lists, strikethrough, bare autolinks).
+/// opt-in GFM extensions (task lists, strikethrough, bare autolinks,
+/// footnotes, definition lists).
 /// Pipe tables are the one always-on GFM exception: they render in both
 /// modes because the CommonMark spec has no pipe-table tests, so
 /// compliance is unaffected.
