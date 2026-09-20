@@ -17,10 +17,23 @@ crate-type = ["cdylib", "rlib"]
 name = "pagina"
 path = "src/main.rs"
 
+# Criterion benchmark target (harness = false: main() comes from
+# criterion_main!). Run with `cargo bench --bench convert`.
+[[bench]]
+name = "convert"
+harness = false
+
 [dependencies]
 yaml-rust = { version = "0.4", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 syntect = { version = "5.3", optional = true, default-features = false, features = ["default-fancy"] }
+
+# Test/bench-only dependencies. None of these affect the default build, the
+# optional-feature builds, or the WASM binary size story: they are pulled in
+# solely by `cargo test` (proptest) and `cargo bench` (criterion).
+[dev-dependencies]
+proptest = "1"
+criterion = "0.6"
 
 [features]
 default = []
