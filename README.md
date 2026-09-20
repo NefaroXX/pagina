@@ -36,7 +36,7 @@ pagina to-html input.md output.html
 # HTML to Markdown
 pagina to-md input.html output.md
 
-# GFM mode (task lists, strikethrough, bare autolinks)
+# GFM mode (task lists, strikethrough, bare autolinks, footnotes, deflists, math)
 pagina to-html --gfm notes.md notes.html
 pagina to-md --gfm page.html page.md
 
@@ -78,8 +78,9 @@ pagina = "0.1"
 
 ### GFM mode
 
-`convert_gfm` / `html_to_markdown_gfm` enable task lists, strikethrough and
-bare autolinks; pipe tables render in both modes.
+`convert_gfm` / `html_to_markdown_gfm` enable task lists, strikethrough,
+bare autolinks, footnotes, definition lists and math; pipe tables render
+in both modes.
 
 ```rust
 use pagina::markdown_to_html::convert_gfm;
@@ -131,6 +132,166 @@ assert_eq!(html, "<h1>Hi</h1>\n");
 
 The default `convert` path stays byte-identical with or without the feature —
 sanitization only happens through the `*_sanitized` entry points.
+
+### AST & visitor
+
+`pagina::ast` exposes an owned, lossless-leaning [`Document`] tree
+(`Block`/`Inline` node types, all `String`s — no arenas, no lifetimes, so it
+is `Send + Sync`). `parse`/`parse_gfm` build it; `render_html`/`render_markdown`
+convert it back (all four are also re-exported at the crate root as
+`pagina::parse`, `pagina::parse_gfm`, `pagina::render_html`,
+`pagina::render_markdown`). The renderers are additive: for matched options,
+`render_html(&parse(md))` is verified byte-identical to
+`markdown_to_html::convert(md)`.
+
+```rust
+use pagina::{parse_gfm, render_html, render_markdown};
+
+let doc = parse_gfm("# Hi\n\nA note[^1].\n\n[^1]: The note.\n");
+let html = render_html(&doc);    // footnotes render as a <section class="footnotes" data-footnotes> footer
+let md = render_markdown(&doc);  // normalized Markdown that re-parses to the same tree
+```
+
+Walk the tree without rendering via `pagina::visitor`: implement the
+`Visitor` trait (both callbacks default to no-ops) and drive it with
+`walk_document` / `walk_block` / `walk_inline` / `walk_inlines` in pre-order:
+
+```rust
+use pagina::ast::{parse, Block};
+use pagina::visitor::{walk_document, Visitor};
+
+#[derive(Default)]
+struct Headings { entries: Vec<(u8, String)> }
+
+impl Visitor for Headings {
+    fn visit_block(&mut self, block: &Block) {
+        if let Block::Heading(h) = block {
+            self.entries
+                .push((h.level, pagina::ast::plain_text(&h.content)));
+        }
+    }
+}
+
+let doc = parse("# A\n\n## B\n", pagina::Options::default());
+let mut toc = Headings::default();
+walk_document(&doc, &mut toc);
+assert_eq!(toc.entries.len(), 2);
+```
+
+### Streaming events
+
+`pagina::stream` is a pulldown-style pull API over the same AST:
+`parse_stream(input, options)` returns a [`Parser`]
+(`Iterator` + `ExactSizeIterator`, with `Parser::new` taking an owned
+[`Document`]); `collect_events` / `events_from_document` hand you the events
+as a `Vec`. Every open is an [`Event::Start`] carrying an owned [`Tag`]
+payload, matched by a payload-free [`Event::End`] with a [`TagEnd`];
+`render_events_to_html` turns an event slice back into HTML (byte-identical
+to `ast::render_html` for its own output, and footnote definitions hoist
+into the same `<section class="footnotes">` footer). Frontmatter is
+metadata and emits no events.
+
+```rust
+use pagina::stream::{parse_stream, render_events_to_html, Event, Tag, TagEnd};
+use pagina::Options;
+
+let events: Vec<Event> = parse_stream("~~done~~", Options::gfm()).collect();
+assert_eq!(render_events_to_html(&events), "<p><del>done</del></p>\n");
+
+let mut parser = parse_stream("# Hi\n", Options::default());
+assert_eq!(parser.len(), 3); // Start(Heading) … Text … End(Heading)
+while let Some(event) = parser.next() {
+    match event {
+        Event::Start(Tag::Heading { level }) => println!("<h{level}>"),
+        Event::End(TagEnd::Heading) => println!("</h>"),
+        _ => {}
+    }
+}
+```
+
+`render_events_to_html_with_highlighter` renders with a syntax highlighter
+(see below).
+
+### Footnotes & definition lists
+
+Both are GFM extensions: enable them with `pagina to-html --gfm` (or the
+library GFM entry points `convert_gfm`, `parse_gfm`, `Options::gfm()`).
+Pure CommonMark mode leaves the syntax literal.
+
+- **Footnotes** — an inline `[^label]` reference plus a `[^label]:`
+  definition. Definitions are hoisted out of flow and rendered as a
+  `<section class="footnotes" data-footnotes>` footer with `id="fn-N"`
+  anchors and `class="footnote-backref"` backlinks, matching the
+  [GitHub Flavored Markdown] shape. `pagina to-md --gfm` folds the footer
+  back into `[^label]:` definitions.
+- **Definition lists** — PHP Markdown Extra-style: a term line followed by a
+  `: description` marker renders `<dl>`/`<dt>`/`<dd>`:
+
+  ```markdown
+  Apple
+  : Pomaceous fruit of the genus *Malus*.
+
+  Orange
+  : Citrus fruit.
+  ```
+
+  Tight lists unwrap single-paragraph `<dd>`s; multi-block descriptions and
+  blank gaps render loose. `pagina to-md --gfm` reverses `<dl>` back to
+  `Term\n: description`.
+
+[GitHub Flavored Markdown]: https://github.github.com/gfm/
+
+### Syntax highlighting
+
+Fenced code blocks highlight through the `pagina::highlight::SyntaxHighlighter`
+trait: implement `write_highlighted(&self, out, lang, code)` (HTML for the
+code *content* only; the `<pre><code class="language-…">` wrapper stays with
+the renderer) and pass it to a renderer:
+
+- `markdown_to_html::convert_with_highlighter(input, options, Some(&hl))`
+- `ast::render_html_with_highlighter(&doc, Some(&hl))`
+- `stream::render_events_to_html_with_highlighter(&events, Some(&hl))`
+
+`language_from_info` extracts the fence language, and implementations that do
+not highlight are expected to fall back to escaping (`code` carries the same
+trailing `\n` as the default escaped path, so fallbacks stay byte-identical).
+
+```rust
+use pagina::highlight::SyntaxHighlighter;
+
+struct Upper;
+impl SyntaxHighlighter for Upper {
+    fn write_highlighted(&self, out: &mut String, lang: &str, code: &str) {
+        out.push_str(&format!("<!--{}-->{}", lang, code));
+    }
+}
+
+let html = pagina::markdown_to_html::convert_with_highlighter(
+    "```rust\nlet x = 1;\n```\n",
+    pagina::markdown_to_html::Options::default(),
+    Some(&Upper),
+)
+.unwrap();
+assert!(html.contains("<!--rust-->"));
+```
+
+The `syntax-highlight` cargo feature (default off) adds a `syntect`-backed
+adapter, `SyntectAdapter::new(&SyntaxSet)`, emitting class-based spans you
+style with your own CSS. It is off by default so the default build stays
+dependency-free and code blocks render HTML-escaped.
+
+### Math (GFM)
+
+Dollar math is a GFM extension (`to-html --gfm`, `convert_gfm`, `parse_gfm`):
+
+- Inline `$…$` renders `<span class="math-inline">…content…</span>`.
+- Display `$$…$$` renders `<div class="math-display">…content…</div>`.
+
+Content is passed through verbatim (HTML-escaped, no inline parsing inside),
+so pair the `math-inline`/`math-display` classes with a client-side renderer
+such as KaTeX or MathJax to typeset the formulas. `pagina to-md --gfm` maps
+the span/div shapes back to `$…$` / `$$…$$`. Dollar heuristics keep currency
+literal: `$5` and `$5 and $10` stay plain text.
 
 ## Security
 

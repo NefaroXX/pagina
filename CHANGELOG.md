@@ -7,11 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Public AST (`pagina::ast`, re-exported `parse` / `parse_gfm` /
+  `render_html` / `render_markdown` at the crate root): an owned
+  `Document` tree that renders back to HTML or Markdown; for matched
+  options `render_html(&parse(md))` is byte-identical to the legacy
+  `convert(md)` path.
+- Generic visitor walker (`pagina::visitor`): the `Visitor` trait plus
+  pre-order `walk_document` / `walk_block` / `walk_inline` / `walk_inlines`
+  traversal over the AST.
+- Streaming pull API (`pagina::stream`): `parse_stream`, `collect_events`,
+  `events_from_document`, and the `Parser` iterator (`Iterator` +
+  `ExactSizeIterator`) yielding owned `Event` / `Tag` / `TagEnd`;
+  `render_events_to_html` / `render_events_to_html_with_highlighter` render
+  event slices back to HTML (byte-identical to `ast::render_html`).
+- GFM footnotes (`[^label]` references plus `[^label]:` definitions rendered
+  as a `<section class="footnotes" data-footnotes>` footer with backrefs)
+  and PHP Markdown Extra-style definition lists (`Term` + `: description`
+  → `<dl>`/`<dt>`/`<dd>`); `html_to_markdown_gfm` reverses both back to
+  source form.
+- Syntax highlighting hook: the `highlight::SyntaxHighlighter` trait with
+  `convert_with_highlighter` / `render_html_with_highlighter` /
+  `render_events_to_html_with_highlighter`, plus the `syntax-highlight`
+  cargo feature (default off) adding a `syntect`-backed `SyntectAdapter`
+  emitting class-based spans.
+- GFM dollar-math passthrough: `$…$` → `<span class="math-inline">`,
+  `$$…$$` → `<div class="math-display">` (content HTML-escaped, verbatim);
+  `html_to_markdown_gfm` maps the shapes back to `$…$` / `$$…$$`.
+
 ### Docs
 
 - README: badge row (CommonMark 652/652, crates.io, docs.rs, CI, npm
   `pagina-wasm`) and usage examples for GFM mode, frontmatter, sanitize, and
   the WASM entry point.
+- README: P2 Library API subsections for the AST + visitor, streaming
+  events, footnotes & definition lists, syntax highlighting, and math, with
+  matching CHANGELOG entries.
 
 ## [0.1.1] - 2026-09-20
 

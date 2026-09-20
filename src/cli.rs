@@ -109,7 +109,7 @@ pub fn print_help() {
     println!();
     println!("OPTIONS:");
     println!(
-        "    --gfm          Enable GFM extensions (task lists, strikethrough, bare autolinks)."
+        "    --gfm          Enable GFM extensions (task lists, strikethrough, bare autolinks, footnotes, deflists, math)."
     );
     println!(
         "                   Pipe tables render with or without --gfm (spec-neutral exception)."

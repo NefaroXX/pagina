@@ -2659,7 +2659,8 @@ pub(crate) fn append_alignment(out: &mut String, a: Alignment) {
 /// unaffected).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Options {
-    /// Enable GFM extensions (task lists, strikethrough, bare autolinks).
+    /// Enable GFM extensions (task lists, strikethrough, bare autolinks,
+    /// footnotes, definition lists, dollar math).
     pub gfm: bool,
 }
 
