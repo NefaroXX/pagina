@@ -1,0 +1,307 @@
+<!doctype html>
+<!--
+  pagina playground — browser demo for the published `pagina-wasm` npm package.
+
+  Pinned dependency: pagina-wasm@0.2.0 (verified on npm: 0.1.0 and 0.2.0 are
+  published, 0.2.0 is `latest` and matches pkg/package.json in this repo).
+
+  No build step: the package's wasm-bindgen "web-target" glue
+  (import * as wasm from "./pagina_bg.wasm") resolves relative to the CDN URL,
+  so direct ESM import works in modern browsers (Chrome 96+, Firefox 89+,
+  Safari 15.2+). Both jsdelivr and unpkg serve .wasm as application/wasm with
+  permissive CORS (verified 2026-09-20).
+
+  Exported bindings available in 0.2.0 (pagina.d.ts): frontmatter_body,
+  frontmatter_get, frontmatter_has, frontmatter_original, html_to_markdown,
+  html_to_markdown_gfm, markdown_to_html, markdown_to_html_gfm,
+  prepend_frontmatter. There is NO sanitize binding in 0.2.0 — see the
+  "sanitized preview" comment in the script below.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pagina playground</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f8fa;
+      --panel: #ffffff;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --muted: #59636e;
+      --accent: #0969da;
+      --error: #cf222e;
+      --ok: #1a7f37;
+      --mono: ui-monospace, SFMono-Regular, "Cascadia Code", "Consolas", monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #4493f8;
+        --error: #f85149;
+        --ok: #3fb950;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header { padding: 1.25rem 1.5rem 0.25rem; }
+    header h1 { margin: 0 0 0.25rem; font-size: 1.35rem; }
+    .sub { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .sub code { font-family: var(--mono); }
+    .toolbar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 1rem;
+      margin: 1rem 1.5rem; padding: 0.65rem 0.9rem;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    }
+    button {
+      font: inherit; cursor: pointer;
+      padding: 0.35rem 0.8rem;
+      background: var(--accent); color: #fff; border: 1px solid transparent; border-radius: 6px;
+    }
+    button:hover { filter: brightness(1.08); }
+    label { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.92rem; cursor: pointer; }
+    #status { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
+    #status.error { color: var(--error); }
+    #status.ok { color: var(--ok); }
+    .panes {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+      margin: 0 1.5rem;
+    }
+    @media (max-width: 800px) { .panes { grid-template-columns: 1fr; } }
+    .pane { display: flex; flex-direction: column; min-width: 0; }
+    .pane > label {
+      font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin-bottom: 0.35rem;
+    }
+    textarea {
+      width: 100%; min-height: 42vh; resize: vertical;
+      font-family: var(--mono); font-size: 0.9rem;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem;
+    }
+    textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .preview {
+      margin: 1rem 1.5rem 2rem;
+    }
+    .preview > label {
+      font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin-bottom: 0.35rem; display: block;
+    }
+    iframe.preview-frame {
+      width: 100%; height: 35vh; resize: vertical;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>pagina — Markdown ⇄ HTML playground</h1>
+    <p class="sub">
+      Powered by <code>pagina-wasm@0.2.0</code> loaded from jsdelivr (pinned).
+      Converter output is rendered verbatim — treat it as unsanitized unless
+      the <em>Sanitized preview</em> toggle is on.
+    </p>
+  </header>
+
+  <section class="toolbar" aria-label="Controls">
+    <button id="direction" type="button" aria-pressed="false">↓ Markdown → HTML</button>
+    <label title="GFM: task lists, strikethrough, bare autolinks (tables render in both modes)">
+      <input type="checkbox" id="gfm" checked> GFM
+    </label>
+    <label title="Apply sanitization to the previewed HTML. See comment in the script: wasm 0.2.0 exports no sanitize binding; DOMPurify fallback is optional.">
+      <input type="checkbox" id="sanitize"> Sanitized preview
+    </label>
+    <span id="status" role="status" aria-live="polite">loading pagina-wasm…</span>
+  </section>
+
+  <section class="panes">
+    <div class="pane">
+      <label for="input">Input</label>
+      <textarea id="input" spellcheck="false" aria-describedby="status"></textarea>
+    </div>
+    <div class="pane">
+      <label for="output">Output</label>
+      <textarea id="output" readonly spellcheck="false" aria-describedby="status"></textarea>
+    </div>
+  </section>
+
+  <section class="preview">
+    <label for="preview">Preview</label>
+    <!--
+      Sandboxed (no scripts, no same-origin): a zero-dependency isolation
+      layer so even raw converter output cannot run script inside the demo.
+      The "Sanitized preview" toggle additionally filters the HTML through
+      DOMPurify when it is loaded (line commented below).
+    -->
+    <iframe id="preview" class="preview-frame" sandbox="" title="Rendered output preview"></iframe>
+  </section>
+
+  <!--
+    Optional sanitizer. pagina-wasm@0.2.0 does NOT export a sanitize binding
+    (checked pkg/pagina.d.ts and the published d.ts: only the 9 core
+    converters + frontmatter helpers). The Rust `sanitize` feature exists
+    (`markdown_to_html_sanitized`, `markdown_to_html_gfm_sanitized` in
+    src/wasm.rs) but the published 0.2.0 artifact was built without it.
+    Until a version ships the sanitized bindings, the "Sanitized preview"
+    toggle uses DOMPurify when you uncomment this line (pin a real version
+    before using in production):
+  -->
+  <!-- <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"></script> -->
+
+  <script>
+    "use strict";
+
+    // Pinned CDN entry point. jsdelivr serves the package files verbatim with
+    // the right MIME types and permissive CORS (verified 2026-09-20), which is
+    // what the native wasm-ES-module import in the package's glue requires.
+    // Alternative: "https://unpkg.com/pagina-wasm@0.2.0/pagina.js"
+    const CDN_URL = "https://cdn.jsdelivr.net/npm/pagina-wasm@0.2.0/pagina.js";
+
+    // Default sample: shows off GFM (strikethrough, task list, table) and the
+    // reverse direction (html → markdown) when toggled.
+    const SAMPLE = [
+      "# pagina playground",
+      "",
+      "Bidirectional **Markdown** ⇄ **HTML** via [pagina-wasm](https://www.npmjs.com/package/pagina-wasm).",
+      "",
+      "## GFM features",
+      "",
+      "- ~~strikethrough~~ (GFM only)",
+      "- [ ] task item (GFM only)",
+      "- [x] checked task",
+      "",
+      "| Mode    | Tables | Strikethrough |",
+      "| ------- | :----: | :-----------: |",
+      "| plain   |  yes   |      no       |",
+      "| GFM     |  yes   |      yes      |",
+      "",
+      "```rust",
+      "fn main() { println!(\"hello\"); }",
+      "```",
+      "",
+      "> Blockquote with `inline code`.",
+      "",
+    ].join("\n");
+
+    // Direction: "md2html" converts the input textarea (markdown) to HTML;
+    // "html2md" converts it back. The GFM checkbox selects the _gfm variants
+    // of the converter on both sides.
+    const state = { direction: "md2html", gfm: true, sanitize: false };
+
+    const $ = (id) => document.getElementById(id);
+    const el = {
+      direction: $("direction"),
+      gfm: $("gfm"),
+      sanitize: $("sanitize"),
+      status: $("status"),
+      input: $("input"),
+      output: $("output"),
+      preview: $("preview"),
+    };
+
+    function setStatus(text, kind) {
+      el.status.textContent = text;
+      el.status.className = kind || "";
+    }
+
+    // Dynamic import so a CDN failure (offline, unsupported browser, …)
+    // surfaces as a caught rejection instead of a dead module script.
+    import(CDN_URL)
+      .then((mod) => {
+        // Names verified against pagina-wasm@0.2.0 pagina.d.ts (published).
+        window.__pagina = {
+          md2html: mod.markdown_to_html,
+          md2htmlGfm: mod.markdown_to_html_gfm,
+          html2md: mod.html_to_markdown,
+          html2mdGfm: mod.html_to_markdown_gfm,
+        };
+        setStatus("pagina-wasm@0.2.0 ready", "ok");
+        el.input.value = SAMPLE;
+        render();
+      })
+      .catch((err) => {
+        console.error("failed to load pagina-wasm:", err);
+        setStatus("could not load pagina-wasm from CDN — see console", "error");
+      });
+
+    function converter() {
+      const api = window.__pagina;
+      const gfm = state.gfm;
+      if (state.direction === "md2html") {
+        return gfm ? api.md2htmlGfm : api.md2html;
+      }
+      return gfm ? api.html2mdGfm : api.html2md;
+    }
+
+    function render() {
+      if (!window.__pagina) return; // still loading — status already says so
+      const fn = converter();
+      let out;
+      try {
+        out = fn(el.input.value);
+      } catch (err) {
+        console.error("conversion failed:", err);
+        setStatus("conversion failed: " + err.message, "error");
+        el.output.value = "";
+        el.preview.srcdoc = "";
+        return;
+      }
+      el.output.value = out;
+      setStatus("pagina-wasm@0.2.0 ready", "ok");
+
+      // Preview: always rendered inside the sandboxed iframe (no scripts).
+      // "Sanitized preview" additionally filters through DOMPurify when the
+      // (commented) CDN script above is enabled. wasm 0.2.0 exports no
+      // sanitize binding, so this is the client-side fallback; once a future
+      // release ships markdown_to_html_sanitized / _gfm_sanitized, prefer
+      // the wasm binding here instead of DOMPurify.
+      let html = out;
+      if (state.sanitize) {
+        if (typeof window.DOMPurify === "function") {
+          html = window.DOMPurify.sanitize(out);
+        } else {
+          // No sanitizer loaded: refuse to label raw HTML as sanitized.
+          // Note: CSS vars don't reach this iframe, hence the hardcoded color.
+          html = "<p style='color:#f85149'>Sanitizer unavailable: " +
+            "pagina-wasm@0.2.0 has no sanitize binding and DOMPurify was not " +
+            "loaded (uncomment its script tag in index.html). Showing raw, " +
+            "sandboxed output instead.</p>" + out;
+        }
+      }
+      el.preview.srcdoc = html;
+    }
+
+    el.direction.addEventListener("click", () => {
+      state.direction = state.direction === "md2html" ? "html2md" : "md2html";
+      const md = state.direction === "md2html";
+      el.direction.textContent = md ? "↓ Markdown → HTML" : "↑ HTML → Markdown";
+      el.direction.setAttribute("aria-pressed", String(!md));
+      el.input.placeholder = md ? "Type markdown here…" : "Paste HTML here…";
+      render();
+    });
+
+    el.gfm.addEventListener("change", () => {
+      state.gfm = el.gfm.checked;
+      render();
+    });
+
+    el.sanitize.addEventListener("change", () => {
+      state.sanitize = el.sanitize.checked;
+      render();
+    });
+
+    el.input.addEventListener("input", render);
+  </script>
+</body>
+</html>
