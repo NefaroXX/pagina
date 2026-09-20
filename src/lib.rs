@@ -8,6 +8,7 @@ pub mod inline_parser;
 pub mod markdown_to_html;
 #[cfg(feature = "sanitize")]
 pub mod sanitize;
+pub mod stream;
 pub mod visitor;
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -55,3 +56,7 @@ pub use markdown_to_html::{
 };
 #[cfg(feature = "sanitize")]
 pub use sanitize::sanitize_html;
+pub use stream::{
+    collect_events, events_from_document, parse_stream, render_events_to_html, Event, Parser, Tag,
+    TagEnd,
+};
